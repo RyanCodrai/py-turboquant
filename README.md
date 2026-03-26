@@ -4,7 +4,7 @@ Python implementation of TurboQuant for vector search.
 
 Compresses high-dimensional vectors to 2-4 bits per coordinate with near-optimal distortion. Data-oblivious (no training), zero indexing time.
 
-Based on: Zandieh, A., Daliri, M., Hadian, M., & Mirrokni, V. (2025). *TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate*. ICLR 2026. [arXiv:2504.19874](https://arxiv.org/abs/2504.19874)
+Unofficial implementation of [TurboQuant](https://arxiv.org/abs/2504.19874) (Google Research, ICLR 2026).
 
 ## Usage
 
@@ -64,6 +64,23 @@ Reproducing Section 4.4 of the paper. recall@1@k = probability that the true nea
 |:----------|:-----------|:--------------------|:---------------|
 | 2-bit     | 37.0 MB    | 15.8x               | 2.5ms/query    |
 | 4-bit     | 73.6 MB    | 8.0x                | 2.5ms/query    |
+
+### OpenAI DBpedia d=3072 (100K database vectors, 1K queries)
+
+| k    | 2-bit recall@1@k | 4-bit recall@1@k |
+|:-----|:-----------------|:-----------------|
+| 1    | 0.907            | 0.970            |
+| 2    | 0.980            | 0.999            |
+| 4    | 0.998            | 1.000            |
+| 8    | 1.000            | 1.000            |
+| 16   | 1.000            | 1.000            |
+| 32   | 1.000            | 1.000            |
+| 64   | 1.000            | 1.000            |
+
+| Bit width | Index size | Compression vs FP32 | Search latency |
+|:----------|:-----------|:--------------------|:---------------|
+| 2-bit     | 73.6 MB    | 15.9x               | 5.5ms/query    |
+| 4-bit     | 146.9 MB   | 8.0x                | 5.1ms/query    |
 
 ## Running benchmarks
 
