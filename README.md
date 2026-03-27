@@ -69,8 +69,8 @@ Reproducing Section 4.4 of the paper. recall@1@k = probability that the true nea
 
 | Bit width | Index size | Compression vs FP32 | Index time | Search latency |
 |:----------|:-----------|:--------------------|:-----------|:---------------|
-| 2-bit     | 37.0 MB    | 15.8x               | 3,282ms    | 2.5ms/query    |
-| 4-bit     | 73.6 MB    | 8.0x                | 5,028ms    | 2.5ms/query    |
+| 2-bit     | 37.0 MB    | 15.8x               | 3,249ms    | 2.2ms/query    |
+| 4-bit     | 73.6 MB    | 8.0x                | 4,986ms    | 2.5ms/query    |
 
 ### OpenAI DBpedia d=3072 (100K database vectors, 1K queries)
 
