@@ -137,13 +137,15 @@ def run_benchmark(database, queries, bit_widths, label=""):
         row = f"  {k:>4}  " + "  ".join(f"{results[bw]['recalls'][k]:>10.4f}" for bw in bit_widths)
         print(row)
 
+    # Summary table
     print()
-    for bw in bit_widths:
-        r = results[bw]
-        mb = r["file_size"] / 1024 / 1024
-        print(f"  {bw}-bit: {mb:.1f} MB ({original_mb / mb:.1f}x compression), "
-              f"encode {r['encode_time']:.2f}s, search {r['search_time']:.1f}s "
-              f"({r['search_time'] / n_queries * 1000:.1f}ms/query)")
+    header = f"  {'':>7}  " + "  ".join(f"{bw}-bit" for bw in bit_widths)
+    print(header)
+    print(f"  {'':>7}  " + "  ".join("─" * 10 for _ in bit_widths))
+    print(f"  {'Size':>7}  " + "  ".join(f"{results[bw]['file_size'] / 1024 / 1024:>7.1f} MB" for bw in bit_widths))
+    print(f"  {'Comp.':>7}  " + "  ".join(f"{original_mb / (results[bw]['file_size'] / 1024 / 1024):>8.1f}x" for bw in bit_widths))
+    print(f"  {'Index':>7}  " + "  ".join(f"{results[bw]['encode_time']*1000:>7.0f} ms" for bw in bit_widths))
+    print(f"  {'Search':>7}  " + "  ".join(f"{results[bw]['search_time'] / n_queries * 1000:>5.1f}ms/q" for bw in bit_widths))
 
 
 DATASETS = {
