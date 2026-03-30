@@ -157,13 +157,23 @@ class TurboQuantIndex:
     def search(self, queries, k=10):
         queries = np.asarray(queries, dtype=np.float32)
         _, centroids = make_codebook(self.bit_width, self.dim)
+        centroids = np.asarray(centroids, dtype=np.float32)
         codes = unpack_codes(self._packed_codes, self.bit_width, self.dim)
 
         Q = make_rotation_matrix(self.dim)
         q_rot = queries @ Q.T
 
-        centroid_vals = centroids[codes]
-        scores = q_rot @ centroid_vals.T
+        # LUT-based scoring: chunk along d to avoid materializing
+        # the full (n_vectors, dim) float array of centroid values.
+        # Each chunk expands only a slice of codes to floats, then
+        # accumulates via BLAS matmul.
+        scores = np.zeros((len(queries), self.n_vectors), dtype=np.float32)
+        CHUNK = 256
+        for j0 in range(0, self.dim, CHUNK):
+            j1 = min(j0 + CHUNK, self.dim)
+            chunk_vals = centroids[codes[:, j0:j1]]
+            scores += q_rot[:, j0:j1] @ chunk_vals.T
+
         scores *= self._norms[None, :]
 
         k = min(k, self.n_vectors)
