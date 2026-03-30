@@ -105,7 +105,8 @@ def run_benchmark(database, queries, bit_widths, label=""):
     results = {}
     for bw in bit_widths:
         t0 = time.time()
-        index = TurboQuantIndex.from_vectors(database, bit_width=bw)
+        index = TurboQuantIndex(database.shape[1], bit_width=bw)
+        index.add(database)
         encode_time = time.time() - t0
 
         index.save("/tmp/bench.tq")
@@ -148,29 +149,32 @@ def run_benchmark(database, queries, bit_widths, label=""):
     print(f"  {'Search':>7}  " + "  ".join(f"{results[bw]['search_time'] / n_queries * 1000:>5.1f}ms/q" for bw in bit_widths))
 
 
-def run_add_vectors_benchmark(database, bit_widths, label=""):
+def run_add_benchmark(database, bit_widths, label=""):
     n, dim = database.shape
-    print(f"\nadd_vectors benchmark ({label})")
+    print(f"\nadd benchmark ({label})")
 
     for bw in bit_widths:
         # Build index from first 99K
-        index = TurboQuantIndex.from_vectors(database[:n - 100], bit_width=bw)
+        index = TurboQuantIndex(dim, bit_width=bw)
+        index.add(database[:n - 100])
 
         # Add 1 vector
         v = database[n - 1:n]
         t0 = time.time()
-        index.add_vectors(v)
+        index.add(v)
         time_1 = time.time() - t0
 
         # Fresh index, then add 100 vectors one at a time
-        index = TurboQuantIndex.from_vectors(database[:n - 100], bit_width=bw)
+        index = TurboQuantIndex(dim, bit_width=bw)
+        index.add(database[:n - 100])
         t0 = time.time()
         for i in range(100):
-            index.add_vectors(database[n - 100 + i : n - 100 + i + 1])
+            index.add(database[n - 100 + i : n - 100 + i + 1])
         time_100 = time.time() - t0
 
         # Verify correctness: same results as building all at once
-        index_full = TurboQuantIndex.from_vectors(database, bit_width=bw)
+        index_full = TurboQuantIndex(dim, bit_width=bw)
+        index_full.add(database)
         q = database[:1]  # use first vector as query
         _, i_inc = index.search(q, k=5)
         _, i_full = index_full.search(q, k=5)
@@ -221,6 +225,6 @@ if __name__ == "__main__":
         print(f"Original size: {n * dim * 4 / 1024 / 1024:.1f} MB (FP32)")
 
         run_benchmark(database, queries, [2, 4], name)
-        run_add_vectors_benchmark(database, [2, 4], name)
+        run_add_benchmark(database, [2, 4], name)
 
     print("\nDone.")
