@@ -132,7 +132,9 @@ class TurboQuantIndex:
 
         # 3. Quantize each coordinate to a small integer bucket
         boundaries, _ = make_codebook(self.bit_width, self.dim)
-        codes = np.searchsorted(boundaries, rotated).astype(np.uint8)
+        codes = np.zeros(rotated.shape, dtype=np.uint8)
+        for b in boundaries:
+            codes += (rotated > b).view(np.uint8)
 
         # 4. Bit-pack the bucket indices for storage
         packed = pack_codes(codes, self.bit_width)
