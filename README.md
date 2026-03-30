@@ -46,24 +46,24 @@ Reproducing Section 4.4 of the paper. recall@1@k = probability that the true nea
 
 | k    | 2-bit recall@1@k | 4-bit recall@1@k |
 |:-----|:-----------------|:-----------------|
-| 1    | 0.511            | 0.826            |
-| 2    | 0.666            | 0.943            |
-| 4    | 0.791            | 0.988            |
-| 8    | 0.887            | 0.998            |
+| 1    | 0.512            | 0.825            |
+| 2    | 0.666            | 0.941            |
+| 4    | 0.792            | 0.987            |
+| 8    | 0.886            | 0.998            |
 | 16   | 0.947            | 1.000            |
 | 32   | 0.977            | 1.000            |
 | 64   | 0.991            | 1.000            |
 
 | Bit width | Index size | Compression vs FP32 | Search latency | Add vector |
 |:----------|:-----------|:--------------------|:---------------|:-----------|
-| 2-bit     | 5.1 MB     | 14.8x               | 1.1ms/query    | 0.7ms/vec  |
-| 4-bit     | 9.9 MB     | 7.7x                | 1.0ms/query    | 0.8ms/vec  |
+| 2-bit     | 5.1 MB     | 14.8x               | 0.9ms/query    | 0.8ms/vec  |
+| 4-bit     | 9.9 MB     | 7.7x                | 0.8ms/query    | 1.1ms/vec  |
 
 ### OpenAI DBpedia d=1536 (100K database vectors, 1K queries)
 
 | k    | 2-bit recall@1@k | 4-bit recall@1@k |
 |:-----|:-----------------|:-----------------|
-| 1    | 0.862            | 0.967            |
+| 1    | 0.862            | 0.962            |
 | 2    | 0.967            | 0.995            |
 | 4    | 0.995            | 1.000            |
 | 8    | 0.999            | 1.000            |
@@ -73,15 +73,15 @@ Reproducing Section 4.4 of the paper. recall@1@k = probability that the true nea
 
 | Bit width | Index size | Compression vs FP32 | Search latency | Add vector |
 |:----------|:-----------|:--------------------|:---------------|:-----------|
-| 2-bit     | 37.0 MB    | 15.8x               | 2.0ms/query    | 4.1ms/vec  |
-| 4-bit     | 73.6 MB    | 8.0x                | 2.2ms/query    | 4.7ms/vec  |
+| 2-bit     | 37.0 MB    | 15.8x               | 2.0ms/query    | 3.7ms/vec  |
+| 4-bit     | 73.6 MB    | 8.0x                | 2.0ms/query    | 7.3ms/vec  |
 
 ### OpenAI DBpedia d=3072 (100K database vectors, 1K queries)
 
 | k    | 2-bit recall@1@k | 4-bit recall@1@k |
 |:-----|:-----------------|:-----------------|
-| 1    | 0.907            | 0.970            |
-| 2    | 0.980            | 0.999            |
+| 1    | 0.907            | 0.966            |
+| 2    | 0.980            | 1.000            |
 | 4    | 0.998            | 1.000            |
 | 8    | 1.000            | 1.000            |
 | 16   | 1.000            | 1.000            |
@@ -90,8 +90,8 @@ Reproducing Section 4.4 of the paper. recall@1@k = probability that the true nea
 
 | Bit width | Index size | Compression vs FP32 | Search latency | Add vector |
 |:----------|:-----------|:--------------------|:---------------|:-----------|
-| 2-bit     | 73.6 MB    | 15.9x               | 3.2ms/query    | 9.2ms/vec  |
-| 4-bit     | 146.9 MB   | 8.0x                | 3.4ms/query    | 14.5ms/vec |
+| 2-bit     | 73.6 MB    | 15.9x               | 2.9ms/query    | 10.7ms/vec |
+| 4-bit     | 146.9 MB   | 8.0x                | 3.2ms/query    | 17.0ms/vec |
 
 ## Running benchmarks
 
