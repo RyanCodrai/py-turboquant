@@ -110,7 +110,6 @@ class TurboQuantIndex:
         self.n_vectors = n_vectors
         self.packed_codes = packed_codes
         self.norms = norms
-        self.codes = None  # lazily unpacked, invalidated on add_vectors
 
     def _encode(self, vectors):
         vectors = np.asarray(vectors, dtype=np.float32)
@@ -154,16 +153,13 @@ class TurboQuantIndex:
             self.norms = np.concatenate([self.norms, norms])
 
         self.n_vectors += len(vectors)
-        self.codes = None
 
     def search(self, queries, k=10):
         queries = np.asarray(queries, dtype=np.float32)
         _, centroids = make_codebook(self.bit_width, self.dim)
         centroids = np.asarray(centroids, dtype=np.float32)
 
-        if self.codes is None:
-            self.codes = unpack_codes(self.packed_codes, self.bit_width, self.dim)
-        codes = self.codes
+        codes = unpack_codes(self.packed_codes, self.bit_width, self.dim)
 
         Q = make_rotation_matrix(self.dim)
         q_rot = (queries @ Q.T).astype(np.float32)
@@ -204,10 +200,11 @@ class TurboQuantIndex:
             packed = np.frombuffer(f.read(packed_bytes), dtype=np.uint8)
             packed = packed.reshape(n_vectors, -1)
             norms = np.frombuffer(f.read(n_vectors * 4), dtype=np.float32).copy()
-        return cls(
+        index = cls(
             dim=dim,
             bit_width=bit_width,
             n_vectors=n_vectors,
             packed_codes=packed,
             norms=norms,
         )
+        return index
