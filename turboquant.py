@@ -163,16 +163,20 @@ class TurboQuantIndex:
         _, centroids = make_codebook(self.bit_width, self.dim)
         centroids = np.asarray(centroids, dtype=np.float32)
 
+        # Rotation uses NumPy (backed by Accelerate/BLAS)
         Q = make_rotation_matrix(self.dim)
         q_rot = (queries @ Q.T).astype(np.float32)
 
         if self._blocked is None:
             self._blocked, self._n_blocks = _rust_repack(
                 self.packed_codes, self.bit_width, self.dim)
+
+        # Scoring in Rust
         scores = _rust_score(q_rot, self._blocked, centroids, self.norms,
                              self.bit_width, self.dim, self.n_vectors,
                              self._n_blocks)
 
+        # Top-k in NumPy
         k = min(k, self.n_vectors)
         top_idx = np.argpartition(-scores, k, axis=-1)[:, :k]
         top_scores = np.take_along_axis(scores, top_idx, axis=-1)
