@@ -24,8 +24,8 @@ pub fn make_rotation_matrix(dim: usize) -> Vec<f32> {
         }
     }
 
-    // QR decomposition
-    let qr = g.col_piv_qr();
+    // Non-pivoted QR decomposition (deterministic)
+    let qr = g.qr();
     let q_full = qr.compute_thin_q();
     let r = qr.compute_thin_r();
 
