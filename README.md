@@ -1,6 +1,6 @@
-# py-turboquant
+# turbovec
 
-Python implementation of TurboQuant for vector search.
+Rust implementation of TurboQuant for vector search, with Python bindings via PyO3.
 
 Compresses high-dimensional vectors to 2-4 bits per coordinate with near-optimal distortion. Data-oblivious (no training), zero indexing time.
 
@@ -8,8 +8,10 @@ Unofficial implementation of [TurboQuant](https://arxiv.org/abs/2504.19874) (Goo
 
 ## Usage
 
+### Python
+
 ```python
-from turboquant import TurboQuantIndex
+from turbovec import TurboQuantIndex
 
 index = TurboQuantIndex(dim=1536, bit_width=4)
 index.add(vectors)
@@ -19,6 +21,18 @@ scores, indices = index.search(query, k=10)
 
 index.write("my_index.tq")
 loaded = TurboQuantIndex.load("my_index.tq")
+```
+
+### Rust
+
+```rust
+use turbovec::TurboQuantIndex;
+
+let mut index = TurboQuantIndex::new(1536, 4);
+index.add(&vectors);
+let results = index.search(&queries, 10);
+index.write("index.tv").unwrap();
+let loaded = TurboQuantIndex::load("index.tv").unwrap();
 ```
 
 ## Performance vs FAISS
@@ -62,15 +76,26 @@ Reproducing Section 4.4 of the paper. recall@1@k = probability that the true nea
 
 ### GloVe d=200 (100K database vectors, 10K queries)
 
-| k    | 2-bit recall@1@k | 4-bit recall@1@k |
-|:-----|:-----------------|:-----------------|
-| 1    | 0.512            | 0.825            |
-| 2    | 0.666            | 0.941            |
-| 4    | 0.792            | 0.987            |
-| 8    | 0.886            | 0.998            |
-| 16   | 0.947            | 1.000            |
-| 32   | 0.977            | 1.000            |
-| 64   | 0.991            | 1.000            |
+**Recall:**
+
+| k    | 2-bit | 4-bit |
+|:-----|:------|:------|
+| 1    | 0.505 | 0.812 |
+| 2    | 0.658 | 0.932 |
+| 4    | 0.789 | 0.986 |
+| 8    | 0.879 | 0.998 |
+| 16   | 0.943 | 1.000 |
+| 32   | 0.976 | 1.000 |
+| 64   | 0.992 | 1.000 |
+
+**Search latency:**
+
+| | 2-bit | 4-bit |
+|---|---|---|
+| MT | 0.029ms/q | 0.040ms/q |
+| ST | 0.275ms/q | 0.429ms/q |
+
+**Compression:**
 
 | Bit width | Index size | Compression vs FP32 |
 |:----------|:-----------|:--------------------|
@@ -79,15 +104,26 @@ Reproducing Section 4.4 of the paper. recall@1@k = probability that the true nea
 
 ### OpenAI DBpedia d=1536 (100K database vectors, 1K queries)
 
-| k    | 2-bit recall@1@k | 4-bit recall@1@k |
-|:-----|:-----------------|:-----------------|
-| 1    | 0.864            | 0.964            |
-| 2    | 0.965            | 0.997            |
-| 4    | 0.995            | 1.000            |
-| 8    | 0.999            | 1.000            |
-| 16   | 1.000            | 1.000            |
-| 32   | 1.000            | 1.000            |
-| 64   | 1.000            | 1.000            |
+**Recall:**
+
+| k    | 2-bit | 4-bit |
+|:-----|:------|:------|
+| 1    | 0.870 | 0.955 |
+| 2    | 0.961 | 0.996 |
+| 4    | 0.998 | 1.000 |
+| 8    | 1.000 | 1.000 |
+| 16   | 1.000 | 1.000 |
+| 32   | 1.000 | 1.000 |
+| 64   | 1.000 | 1.000 |
+
+**Search latency:**
+
+| | 2-bit | 4-bit |
+|---|---|---|
+| MT | 0.138ms/q | 0.256ms/q |
+| ST | 1.448ms/q | 2.784ms/q |
+
+**Compression:**
 
 | Bit width | Index size | Compression vs FP32 |
 |:----------|:-----------|:--------------------|
@@ -96,15 +132,26 @@ Reproducing Section 4.4 of the paper. recall@1@k = probability that the true nea
 
 ### OpenAI DBpedia d=3072 (100K database vectors, 1K queries)
 
-| k    | 2-bit recall@1@k | 4-bit recall@1@k |
-|:-----|:-----------------|:-----------------|
-| 1    | 0.910            | 0.971            |
-| 2    | 0.982            | 1.000            |
-| 4    | 0.998            | 1.000            |
-| 8    | 1.000            | 1.000            |
-| 16   | 1.000            | 1.000            |
-| 32   | 1.000            | 1.000            |
-| 64   | 1.000            | 1.000            |
+**Recall:**
+
+| k    | 2-bit | 4-bit |
+|:-----|:------|:------|
+| 1    | 0.912 | 0.967 |
+| 2    | 0.986 | 0.997 |
+| 4    | 1.000 | 1.000 |
+| 8    | 1.000 | 1.000 |
+| 16   | 1.000 | 1.000 |
+| 32   | 1.000 | 1.000 |
+| 64   | 1.000 | 1.000 |
+
+**Search latency:**
+
+| | 2-bit | 4-bit |
+|---|---|---|
+| MT | 0.395ms/q | 0.604ms/q |
+| ST | 3.240ms/q | 5.711ms/q |
+
+**Compression:**
 
 | Bit width | Index size | Compression vs FP32 |
 |:----------|:-----------|:--------------------|
@@ -127,36 +174,48 @@ Each vector is a direction on a high-dimensional hypersphere. TurboQuant compres
 
 The paper proves this achieves distortion within a factor of 2.7x of the information-theoretic lower bound (Shannon's distortion-rate limit). You cannot do much better for a given number of bits.
 
-**Online by design.** Because the codebook and rotation are derived from math (not from the data), new vectors can be added at any time without rebuilding the index. Each vector is encoded independently in ~4ms at d=1536. Traditional methods like Product Quantization require expensive offline codebook training that must be re-run when data changes.
+**Online by design.** Because the codebook and rotation are derived from math (not from the data), new vectors can be added at any time without rebuilding the index. Traditional methods like Product Quantization require expensive offline codebook training that must be re-run when data changes.
 
 ## Architecture
 
-The search pipeline is implemented in Rust with Python bindings via PyO3:
+The project is a Cargo workspace with two crates:
+
+- **turbovec** -- pure Rust crate with zero Python dependency. Contains all SIMD kernels, encoding, and search logic.
+- **turbovec-python** -- thin PyO3 wrapper exposing `TurboQuantIndex` to Python.
+
+### Search pipeline
 
 - **NEON kernel (ARM):** Sequential code layout. `vqtbl1q_u8` shuffle-based LUT scoring with `vaddw_u8` widening accumulation. Per-block heap with QBS=4 query batching.
 - **AVX2 kernel (x86):** FAISS-style perm0-interleaved code layout to work around AVX2's cross-lane shuffle constraint. `vpshufb` with uint16 reinterpret trick and `combine2x2` flush. Multi-query NQ=4 scoring with fused heap and SIMD early-rejection.
-- **Rotation:** Parallelized chunked GEMM via ndarray. Uses Accelerate (macOS) or OpenBLAS (Linux) when available.
+- **Rotation:** BLAS-accelerated matrix multiplication via ndarray. Uses Accelerate (macOS) or OpenBLAS (Linux).
 
 ## Building
 
+### Python (via maturin)
+
 ```bash
 pip install maturin
-cd py-turboquant
+cd turbovec-python
 RUSTFLAGS="-C target-cpu=native" maturin build --release
 pip install target/wheels/*.whl
+```
+
+### Rust
+
+```bash
+cargo build --release
 ```
 
 ## Running benchmarks
 
 Download datasets:
 ```
-python3 benchmark.py download glove openai-1536 openai-3072
+python3 benchmarks/benchmark.py download glove openai-1536 openai-3072
 ```
 
 Run benchmarks:
 ```
-python3 benchmark.py openai-1536
-python3 benchmark_faiss.py openai-1536
+python3 benchmarks/benchmark.py glove openai-1536 openai-3072
 ```
 
 ## References

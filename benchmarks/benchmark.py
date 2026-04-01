@@ -20,7 +20,7 @@ import time
 import h5py
 import numpy as np
 
-from turboquant import TurboQuantIndex
+from turbovec import TurboQuantIndex
 
 DATA_DIR = os.path.expanduser("~/data/py-turboquant")
 
@@ -94,7 +94,7 @@ def recall_at_1_at_k(true_top1, predicted_indices, k):
     return np.mean([true_top1[i] in predicted_indices[i, :k] for i in range(len(true_top1))])
 
 
-def bench_search(index, queries, k, n_runs=25):
+def bench_search(index, queries, k, n_runs=1):
     # Warmup
     index.search(queries[:1], k)
 
@@ -158,7 +158,7 @@ def run_benchmark(database, queries, bit_widths, label=""):
     print(f"  {'Comp.':>7}  " + "  ".join(f"{original_mb / (results[bw]['file_size'] / 1024 / 1024):>8.1f}x" for bw in bit_widths))
     print(f"  {'Index':>7}  " + "  ".join(f"{results[bw]['encode_time']*1000:>7.0f} ms" for bw in bit_widths))
     n_threads = os.environ.get("RAYON_NUM_THREADS", "all")
-    print(f"  {'Search':>7}  " + "  ".join(f"{results[bw]['search_time'] / n_queries * 1000:>5.3f}ms/q" for bw in bit_widths) + f"  ({n_threads} threads, median of 25 runs)")
+    print(f"  {'Search':>7}  " + "  ".join(f"{results[bw]['search_time'] / n_queries * 1000:>5.3f}ms/q" for bw in bit_widths) + f"  ({n_threads} threads)")
 
 
 def run_add_benchmark(database, bit_widths, label=""):

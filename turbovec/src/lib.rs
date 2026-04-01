@@ -4,13 +4,13 @@
 //! near-optimal distortion. Data-oblivious — no training required.
 //!
 //! ```rust
-//! use turbovec::TurboVecIndex;
+//! use turbovec::TurboQuantIndex;
 //!
-//! let mut index = TurboVecIndex::new(1536, 4);
+//! let mut index = TurboQuantIndex::new(1536, 4);
 //! index.add(&vectors);
 //! let results = index.search(&queries, 10);
 //! index.write("index.tv").unwrap();
-//! let loaded = TurboVecIndex::load("index.tv").unwrap();
+//! let loaded = TurboQuantIndex::load("index.tv").unwrap();
 //! ```
 
 pub mod codebook;
@@ -26,7 +26,7 @@ const ROTATION_SEED: u64 = 42;
 const BLOCK: usize = 32;
 const FLUSH_EVERY: usize = 256;
 
-pub struct TurboVecIndex {
+pub struct TurboQuantIndex {
     dim: usize,
     bit_width: usize,
     n_vectors: usize,
@@ -56,7 +56,7 @@ impl SearchResults {
     }
 }
 
-impl TurboVecIndex {
+impl TurboQuantIndex {
     pub fn new(dim: usize, bit_width: usize) -> Self {
         assert!(
             bit_width >= 2 && bit_width <= 4,

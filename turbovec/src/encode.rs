@@ -1,5 +1,8 @@
 //! Encode vectors: normalize, rotate, quantize, bit-pack.
 
+use ndarray::{Array2, ArrayView2, s};
+use rayon::prelude::*;
+
 /// Encode n vectors of dimension dim.
 /// Returns (packed_codes as flat Vec<u8>, norms as Vec<f32>).
 pub fn encode(
@@ -11,7 +14,7 @@ pub fn encode(
     bit_width: usize,
 ) -> (Vec<u8>, Vec<f32>) {
     let mut norms = vec![0.0f32; n];
-    let mut unit = vec![0.0f32; n * dim];
+    let mut unit_flat = vec![0.0f32; n * dim];
 
     // 1. Extract norms and normalize
     for i in 0..n {
@@ -20,21 +23,15 @@ pub fn encode(
         norms[i] = norm;
         let inv_norm = if norm > 1e-10 { 1.0 / norm } else { 0.0 };
         for j in 0..dim {
-            unit[i * dim + j] = row[j] * inv_norm;
+            unit_flat[i * dim + j] = row[j] * inv_norm;
         }
     }
 
-    // 2. Rotate: rotated = unit @ rotation.T
-    let mut rotated = vec![0.0f32; n * dim];
-    for i in 0..n {
-        for j in 0..dim {
-            let mut sum = 0.0f32;
-            for k in 0..dim {
-                sum += unit[i * dim + k] * rotation[j * dim + k];
-            }
-            rotated[i * dim + j] = sum;
-        }
-    }
+    // 2. Rotate: rotated = unit @ rotation.T (BLAS-accelerated via ndarray)
+    let unit_mat = ArrayView2::from_shape((n, dim), &unit_flat).unwrap();
+    let rot_mat = ArrayView2::from_shape((dim, dim), rotation).unwrap();
+    let rotated_mat = unit_mat.dot(&rot_mat.t());
+    let rotated = rotated_mat.as_slice().unwrap();
 
     // 3. Quantize: for each boundary, codes += (rotated > boundary)
     let mut codes = vec![0u8; n * dim];
@@ -53,8 +50,6 @@ pub fn encode(
 }
 
 /// Pack quantized codes into bit-plane format.
-/// Input: codes[n][dim] as flat Vec<u8>, each value 0..2^bits-1.
-/// Output: packed bytes in bit-plane layout.
 fn pack_codes(codes: &[u8], n: usize, dim: usize, bits: usize) -> Vec<u8> {
     let bytes_per_plane = dim / 8;
     let bytes_per_row = bits * bytes_per_plane;

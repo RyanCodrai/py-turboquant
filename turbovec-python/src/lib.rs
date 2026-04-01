@@ -3,16 +3,16 @@ use pyo3::prelude::*;
 use pyo3::types::PyType;
 
 #[pyclass]
-struct TurboVecIndex {
-    inner: turbovec_core::TurboVecIndex,
+struct TurboQuantIndex {
+    inner: turbovec_core::TurboQuantIndex,
 }
 
 #[pymethods]
-impl TurboVecIndex {
+impl TurboQuantIndex {
     #[new]
     fn new(dim: usize, bit_width: usize) -> Self {
         Self {
-            inner: turbovec_core::TurboVecIndex::new(dim, bit_width),
+            inner: turbovec_core::TurboQuantIndex::new(dim, bit_width),
         }
     }
 
@@ -51,7 +51,7 @@ impl TurboVecIndex {
 
     #[classmethod]
     fn load(_cls: &Bound<PyType>, path: &str) -> PyResult<Self> {
-        let inner = turbovec_core::TurboVecIndex::load(path).map_err(|e| {
+        let inner = turbovec_core::TurboQuantIndex::load(path).map_err(|e| {
             pyo3::exceptions::PyIOError::new_err(format!("{}", e))
         })?;
         Ok(Self { inner })
@@ -74,6 +74,6 @@ impl TurboVecIndex {
 
 #[pymodule]
 fn turbovec(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<TurboVecIndex>()?;
+    m.add_class::<TurboQuantIndex>()?;
     Ok(())
 }
