@@ -1,14 +1,8 @@
 # turbovec
 
-Rust implementation of TurboQuant for vector search, with Python bindings via PyO3.
+Fast vector quantization in Rust with Python bindings. Compresses vectors to 2-4 bits per dimension with near-optimal distortion. Implementation of [TurboQuant](https://arxiv.org/abs/2504.19874) (Google Research, ICLR 2026).
 
-Compresses high-dimensional vectors to 2-4 bits per coordinate with near-optimal distortion. Unofficial implementation of [TurboQuant](https://arxiv.org/abs/2504.19874) (Google Research, ICLR 2026).
-
-Compared to trained quantization methods like FAISS PQ:
-
-- **Faster index creation** -- no training step required. Codebook and rotation are derived from math, not from the data.
-- **Online** -- new vectors can be added at any time without rebuilding or re-optimizing the index. No codebook retraining when data changes, leading to simplified infrastructure with no index maintenance.
-- **Comparable or higher recall** -- matches FAISS at 4-bit, exceeds FAISS at 2-bit on high-dimensional data (0.912 vs 0.903 at d=3072).
+Unlike trained methods like FAISS PQ, TurboQuant is **data-oblivious** — no training step, no codebook retraining when data changes, and new vectors can be added at any time. This means faster index creation, simpler infrastructure, and comparable or higher recall.
 
 ## Usage
 
@@ -85,20 +79,12 @@ Each vector is a direction on a high-dimensional hypersphere. TurboQuant compres
 
 The paper proves this achieves distortion within a factor of 2.7x of the information-theoretic lower bound (Shannon's distortion-rate limit). You cannot do much better for a given number of bits.
 
-**Online by design.** Because the codebook and rotation are derived from math (not from the data), new vectors can be added at any time without rebuilding the index. Traditional methods like Product Quantization require expensive offline codebook training that must be re-run when data changes.
-
 ## Architecture
 
-The project is a Cargo workspace with two crates:
+Cargo workspace with two crates:
 
-- **turbovec** -- pure Rust crate with zero Python dependency. Contains all SIMD kernels, encoding, and search logic.
+- **turbovec** -- pure Rust crate, zero Python dependency. SIMD search kernels (NEON on ARM, AVX2 on x86), encoding, and I/O.
 - **turbovec-python** -- thin PyO3 wrapper exposing `TurboQuantIndex` to Python.
-
-### Search pipeline
-
-- **NEON kernel (ARM):** Sequential code layout. `vqtbl1q_u8` shuffle-based LUT scoring with `vaddw_u8` widening accumulation. Per-block heap with QBS=4 query batching.
-- **AVX2 kernel (x86):** FAISS-style perm0-interleaved code layout to work around AVX2's cross-lane shuffle constraint. `vpshufb` with uint16 reinterpret trick and `combine2x2` flush. Multi-query NQ=4 scoring with fused heap and SIMD early-rejection.
-- **Rotation:** BLAS-accelerated matrix multiplication via ndarray. Uses Accelerate (macOS) or OpenBLAS (Linux).
 
 ## Building
 
