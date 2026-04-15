@@ -1,4 +1,19 @@
-# turbovec
+<p align="center">
+  <img src="docs/logo.png" alt="turbovec" width="480">
+</p>
+
+<p align="center">
+  <strong>Training-free vector search at 2–4 bits per dimension, with SIMD kernels that match or beat FAISS FastScan on every modern CPU.</strong>
+</p>
+
+<p align="center">
+  <a href="https://pypi.org/project/turbovec/"><img src="https://img.shields.io/pypi/v/turbovec.svg?color=635bff" alt="PyPI"></a>
+  <a href="https://crates.io/crates/turbovec"><img src="https://img.shields.io/crates/v/turbovec.svg?color=635bff" alt="crates.io"></a>
+  <a href="https://github.com/RyanCodrai/turbovec/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
+  <a href="https://arxiv.org/abs/2504.19874"><img src="https://img.shields.io/badge/paper-arXiv-b31b1b.svg" alt="TurboQuant paper"></a>
+</p>
+
+---
 
 Fast vector index in Rust with Python bindings. Compresses vectors to 2-4 bits per dimension using [TurboQuant](https://arxiv.org/abs/2504.19874) (Google Research, ICLR 2026) with near-optimal distortion.
 
