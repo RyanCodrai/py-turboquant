@@ -1,5 +1,6 @@
 __pycache__/
 .cache/
+.venv/
 *.pyc
 *.bak
 *.so
