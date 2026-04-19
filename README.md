@@ -11,9 +11,15 @@
 
 ---
 
-Fast vector index in Rust with Python bindings. Compresses vectors to 2-4 bits per dimension using [TurboQuant](https://arxiv.org/abs/2504.19874) (Google Research, ICLR 2026) with near-optimal distortion.
+**A 10 million document corpus takes 31 GB of RAM as float32. turbovec fits it in 4 GB - and searches it faster than FAISS.**
 
-Unlike trained methods like FAISS PQ, TurboQuant is **data-oblivious** — no training step, no codebook retraining when data changes, and new vectors can be added at any time. This means faster index creation, simpler infrastructure, and comparable or higher recall.
+turbovec is a Rust vector index with Python bindings, built on Google Research's [**TurboQuant**](https://arxiv.org/abs/2504.19874) algorithm - a data-oblivious quantizer that matches the Shannon lower bound on distortion with zero training and zero data passes.
+
+- **No codebook training.** Add vectors, they're indexed. No k-means pass.
+- **Faster than FAISS.** Hand-written NEON (ARM) and AVX-512BW (x86) kernels beat FAISS IndexPQFastScan by 12–20% on ARM and match-or-beat it on x86.
+- **Pure local.** No managed service, no data leaving your machine or VPC. Pair with any open-source embedding model for a fully air-gapped RAG stack.
+
+Building RAG where privacy, memory, or latency matters? **You're in the right place.**
 
 ## Python
 
