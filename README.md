@@ -40,17 +40,13 @@ index.write("my_index.tq")
 loaded = TurboQuantIndex.load("my_index.tq")
 ```
 
-Full reference — including `IdMapIndex` for stable external ids and the `.tv` / `.tvim` file formats — in [`docs/api.md`](docs/api.md).
+See [`docs/api.md`](docs/api.md) for the full reference.
 
 ### Framework integrations
 
-Drop-in adapters for the major LLM frameworks. Each exposes the framework's native API (retriever, document store, etc.) backed by turbovec internally. All three support O(1) delete by id and save/load.
-
-| Framework | Install | Guide |
-|---|---|---|
-| LangChain | `pip install turbovec[langchain]` | [`docs/integrations/langchain.md`](docs/integrations/langchain.md) |
-| LlamaIndex | `pip install turbovec[llama-index]` | [`docs/integrations/llama_index.md`](docs/integrations/llama_index.md) |
-| Haystack | `pip install turbovec[haystack]` | [`docs/integrations/haystack.md`](docs/integrations/haystack.md) |
+- [LangChain](docs/integrations/langchain.md) — `pip install turbovec[langchain]`
+- [LlamaIndex](docs/integrations/llama_index.md) — `pip install turbovec[llama-index]`
+- [Haystack](docs/integrations/haystack.md) — `pip install turbovec[haystack]`
 
 ## Rust
 
