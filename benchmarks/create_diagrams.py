@@ -246,8 +246,8 @@ def write_recall_panel(dim_key, dim_label, filename, y_lo=0.85):
     px = margin["left"]
     py = margin["top"]
 
-    x_values = [1, 2, 4, 8, 16]
-    x_labels = ["1", "2", "4", "8", "16"]
+    x_values = [1, 2, 4, 8, 16, 32, 64]
+    x_labels = ["1", "2", "4", "8", "16", "32", "64"]
 
     series = []
     for bw_key, bw_label in [("2bit", "2-bit"), ("4bit", "4-bit")]:
