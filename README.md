@@ -40,7 +40,7 @@ index.write("my_index.tq")
 loaded = TurboQuantIndex.load("my_index.tq")
 ```
 
-Need stable ids that survive deletes? Use `IdMapIndex` — a hash-table-backed wrapper roughly equivalent to FAISS's `IndexIDMap2`:
+Need stable ids that survive deletes? Use `IdMapIndex`:
 
 ```python
 import numpy as np
