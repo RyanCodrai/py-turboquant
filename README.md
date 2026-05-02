@@ -40,6 +40,22 @@ index.write("my_index.tq")
 loaded = TurboQuantIndex.load("my_index.tq")
 ```
 
+Need stable ids that survive deletes? Use `IdMapIndex`:
+
+```python
+import numpy as np
+from turbovec import IdMapIndex
+
+index = IdMapIndex(dim=1536, bit_width=4)
+index.add_with_ids(vectors, np.array([1001, 1002, 1003], dtype=np.uint64))
+
+scores, ids = index.search(query, k=10)   # ids are your uint64 external ids
+index.remove(1002)                         # O(1) by id
+
+index.write("my_index.tvim")
+loaded = IdMapIndex.load("my_index.tvim")
+```
+
 See [`docs/api.md`](docs/api.md) for the full reference.
 
 ### Framework integrations
@@ -62,6 +78,19 @@ index.add(&vectors);
 let results = index.search(&queries, 10);
 index.write("index.tv").unwrap();
 let loaded = TurboQuantIndex::load("index.tv").unwrap();
+```
+
+For stable external ids that survive deletes:
+
+```rust
+use turbovec::IdMapIndex;
+
+let mut index = IdMapIndex::new(1536, 4);
+index.add_with_ids(&vectors, &[1001, 1002, 1003]);
+let (scores, ids) = index.search(&queries, 10);
+index.remove(1002);
+index.write("index.tvim").unwrap();
+let loaded = IdMapIndex::load("index.tvim").unwrap();
 ```
 
 ## Recall
