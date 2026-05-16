@@ -219,9 +219,9 @@ def test_save_and_load_roundtrip(tmp_path):
     # Delete one so we exercise a non-identity slot_to_id mapping.
     store.delete_documents(["doc-2"])
 
-    store.save(tmp_path)
+    store.save_to_disk(tmp_path)
 
-    restored = TurboQuantDocumentStore.load(
+    restored = TurboQuantDocumentStore.load_from_disk(
         tmp_path, allow_dangerous_deserialization=True
     )
     assert restored.count_documents() == 4
@@ -238,9 +238,247 @@ def test_save_and_load_roundtrip(tmp_path):
 def test_load_refuses_without_flag(tmp_path):
     store = TurboQuantDocumentStore(dim=DIM, bit_width=4)
     store.write_documents(make_docs(2))
-    store.save(tmp_path)
+    store.save_to_disk(tmp_path)
     with pytest.raises(ValueError, match="allow_dangerous_deserialization"):
-        TurboQuantDocumentStore.load(tmp_path)
+        TurboQuantDocumentStore.load_from_disk(tmp_path)
+
+
+# ---- Tier 1: input validation -------------------------------------------------
+
+def test_write_documents_rejects_non_list():
+    store = TurboQuantDocumentStore(dim=DIM, bit_width=4)
+    with pytest.raises(ValueError, match="list of Documents"):
+        store.write_documents("not a list of docs")  # type: ignore[arg-type]
+
+
+def test_write_documents_rejects_non_document_elements():
+    store = TurboQuantDocumentStore(dim=DIM, bit_width=4)
+    with pytest.raises(ValueError, match="list of Documents"):
+        store.write_documents([{"id": "x"}])  # type: ignore[list-item]
+
+
+# ---- Tier 2: utility methods ----------------------------------------------
+
+def test_delete_all_documents():
+    store = TurboQuantDocumentStore(dim=DIM, bit_width=4)
+    store.write_documents(make_docs(5))
+    assert store.count_documents() == 5
+    store.delete_all_documents()
+    assert store.count_documents() == 0
+
+
+def test_delete_by_filter_returns_count():
+    store = TurboQuantDocumentStore(dim=DIM, bit_width=4)
+    store.write_documents(make_docs(6))
+    filt = {"field": "meta.group", "operator": "==", "value": "a"}
+    deleted = store.delete_by_filter(filt)
+    assert deleted == 3
+    assert store.count_documents() == 3
+    assert all(
+        doc.meta["group"] == "b" for doc in store.filter_documents()
+    )
+
+
+def test_update_by_filter_merges_metadata():
+    store = TurboQuantDocumentStore(dim=DIM, bit_width=4)
+    store.write_documents(make_docs(4))
+    filt = {"field": "meta.group", "operator": "==", "value": "a"}
+    updated = store.update_by_filter(filt, {"tier": "premium"})
+    assert updated == 2
+    pros = [
+        doc
+        for doc in store.filter_documents()
+        if doc.meta.get("tier") == "premium"
+    ]
+    assert {doc.id for doc in pros} == {"doc-0", "doc-2"}
+    # Non-matching docs untouched.
+    others = [doc for doc in store.filter_documents() if "tier" not in doc.meta]
+    assert {doc.id for doc in others} == {"doc-1", "doc-3"}
+
+
+def test_count_documents_by_filter():
+    store = TurboQuantDocumentStore(dim=DIM, bit_width=4)
+    store.write_documents(make_docs(6))
+    filt = {"field": "meta.group", "operator": "==", "value": "a"}
+    assert store.count_documents_by_filter(filt) == 3
+    # Empty/falsy filter falls through to full count.
+    assert store.count_documents_by_filter({}) == 6
+
+
+def test_count_unique_metadata_by_filter():
+    store = TurboQuantDocumentStore(dim=DIM, bit_width=4)
+    store.write_documents(make_docs(6))
+    # Two unique "group" values across all docs.
+    result = store.count_unique_metadata_by_filter({}, ["meta.group"])
+    assert result == {"group": 2}
+    # Filtered subset: only group "a" → 1 unique.
+    filt = {"field": "meta.group", "operator": "==", "value": "a"}
+    result = store.count_unique_metadata_by_filter(filt, ["group"])
+    assert result == {"group": 1}
+
+
+def test_get_metadata_fields_info_infers_types():
+    store = TurboQuantDocumentStore(dim=DIM, bit_width=4)
+    docs = make_docs(2)
+    # make_docs gives idx (int) and group (str/keyword); add a bool + float.
+    docs[0].meta["active"] = True
+    docs[0].meta["weight"] = 1.5
+    store.write_documents(docs)
+    info = store.get_metadata_fields_info()
+    assert info["idx"] == {"type": "int"}
+    assert info["group"] == {"type": "keyword"}
+    assert info["active"] == {"type": "boolean"}
+    assert info["weight"] == {"type": "float"}
+
+
+def test_get_metadata_field_min_max():
+    store = TurboQuantDocumentStore(dim=DIM, bit_width=4)
+    store.write_documents(make_docs(5))  # idx in {0,1,2,3,4}
+    assert store.get_metadata_field_min_max("idx") == {"min": 0, "max": 4}
+    # Missing field returns the empty sentinel.
+    assert store.get_metadata_field_min_max("missing") == {
+        "min": None,
+        "max": None,
+    }
+
+
+def test_get_metadata_field_unique_values():
+    store = TurboQuantDocumentStore(dim=DIM, bit_width=4)
+    store.write_documents(make_docs(4))
+    values, n = store.get_metadata_field_unique_values("group")
+    assert sorted(values) == ["a", "b"]
+    assert n == 2
+    # search_term narrows to docs whose content contains the term.
+    values, n = store.get_metadata_field_unique_values("group", search_term="text 0")
+    assert values == ["a"]
+    assert n == 1
+
+
+def test_storage_property_returns_documents_by_id():
+    store = TurboQuantDocumentStore(dim=DIM, bit_width=4)
+    store.write_documents(make_docs(3))
+    storage = store.storage
+    assert set(storage.keys()) == {"doc-0", "doc-1", "doc-2"}
+    assert storage["doc-1"].meta["idx"] == 1
+    # Embeddings always None — turbovec doesn't keep them.
+    assert all(doc.embedding is None for doc in storage.values())
+
+
+def test_shutdown_is_idempotent():
+    store = TurboQuantDocumentStore(dim=DIM, bit_width=4)
+    store.shutdown()
+    store.shutdown()  # second call should not raise
+
+
+def test_filter_documents_invalid_filter_raises():
+    store = TurboQuantDocumentStore(dim=DIM, bit_width=4)
+    store.write_documents(make_docs(2))
+    with pytest.raises(ValueError, match="Invalid filter syntax"):
+        store.filter_documents(filters={"some_random_key": "value"})
+
+
+# ---- Tier 3: scale_score formula per similarity function ------------------
+
+def test_scale_score_cosine_formula():
+    store = TurboQuantDocumentStore(
+        dim=DIM, bit_width=4, embedding_similarity_function="cosine"
+    )
+    store.write_documents(make_docs(3))
+    results = store.embedding_retrieval(
+        query_embedding=make_docs(3)[0].embedding, top_k=3, scale_score=True
+    )
+    # Cosine scores live in [-1, 1]; after (s+1)/2 they're in [0, 1].
+    for doc in results:
+        assert 0.0 <= doc.score <= 1.0
+
+
+def test_scale_score_dot_product_formula():
+    store = TurboQuantDocumentStore(
+        dim=DIM, bit_width=4, embedding_similarity_function="dot_product"
+    )
+    store.write_documents(make_docs(3))
+    results = store.embedding_retrieval(
+        query_embedding=make_docs(3)[0].embedding, top_k=3, scale_score=True
+    )
+    # expit(s/100) sigmoid is monotonically increasing on (-inf, inf) → (0, 1).
+    for doc in results:
+        assert 0.0 < doc.score < 1.0
+
+
+def test_constructor_default_similarity_is_cosine():
+    store = TurboQuantDocumentStore(dim=DIM, bit_width=4)
+    assert store.embedding_similarity_function == "cosine"
+
+
+def test_to_dict_includes_new_init_params():
+    store = TurboQuantDocumentStore(
+        dim=DIM, bit_width=2, embedding_similarity_function="dot_product", return_embedding=True
+    )
+    serialized = store.to_dict()
+    ip = serialized["init_parameters"]
+    assert ip["embedding_similarity_function"] == "dot_product"
+    assert ip["return_embedding"] is True
+    restored = TurboQuantDocumentStore.from_dict(serialized)
+    assert restored.embedding_similarity_function == "dot_product"
+    assert restored.return_embedding is True
+
+
+# ---- Async methods ------------------------------------------------------
+
+def test_async_count_filter_write_delete():
+    import asyncio
+
+    async def runner():
+        store = TurboQuantDocumentStore(dim=DIM, bit_width=4)
+        n = await store.write_documents_async(make_docs(4))
+        assert n == 4
+        assert await store.count_documents_async() == 4
+        docs = await store.filter_documents_async()
+        assert len(docs) == 4
+        await store.delete_documents_async(["doc-0", "doc-1"])
+        assert await store.count_documents_async() == 2
+        await store.delete_all_documents_async()
+        assert await store.count_documents_async() == 0
+
+    asyncio.run(runner())
+
+
+def test_async_filter_helpers():
+    import asyncio
+
+    async def runner():
+        store = TurboQuantDocumentStore(dim=DIM, bit_width=4)
+        await store.write_documents_async(make_docs(6))
+        filt = {"field": "meta.group", "operator": "==", "value": "a"}
+        assert await store.count_documents_by_filter_async(filt) == 3
+        n = await store.update_by_filter_async(filt, {"tier": "free"})
+        assert n == 3
+        unique = await store.count_unique_metadata_by_filter_async({}, ["tier"])
+        assert unique == {"tier": 1}
+        info = await store.get_metadata_fields_info_async()
+        assert "group" in info
+        mm = await store.get_metadata_field_min_max_async("idx")
+        assert mm == {"min": 0, "max": 5}
+        uniq, n = await store.get_metadata_field_unique_values_async("group")
+        assert sorted(uniq) == ["a", "b"]
+
+    asyncio.run(runner())
+
+
+def test_async_embedding_retrieval():
+    import asyncio
+
+    async def runner():
+        store = TurboQuantDocumentStore(dim=DIM, bit_width=4)
+        docs = make_docs(5)
+        await store.write_documents_async(docs)
+        results = await store.embedding_retrieval_async(
+            query_embedding=docs[0].embedding, top_k=3
+        )
+        assert len(results) == 3
+        assert results[0].id == "doc-0"
+
+    asyncio.run(runner())
 
 
 def test_to_dict_from_dict_round_trip():
