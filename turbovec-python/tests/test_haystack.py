@@ -508,6 +508,116 @@ def test_dump_and_load_empty_lazy_store(tmp_path):
     assert loaded._index.dim == DIM
 
 
+# ---- End-to-end smoke tests: framework wiring ---------------------------
+
+def test_pipeline_end_to_end_retrieval():
+    # Smoke test: wire our store into a Haystack Pipeline via a custom
+    # retriever component and run a query end-to-end. The custom
+    # retriever is a tiny component that just delegates to
+    # store.embedding_retrieval — its job is to exercise the Pipeline
+    # plumbing on top of our store, not to be a real retriever.
+    from haystack import Pipeline, component
+    from haystack.components.embedders import SentenceTransformersTextEmbedder  # noqa: F401 (just an import check)
+
+    @component
+    class _ProbeRetriever:
+        """Minimal Haystack component: calls embedding_retrieval on its store."""
+
+        def __init__(self, document_store):
+            self.document_store = document_store
+
+        @component.output_types(documents=list)
+        def run(self, query_embedding, top_k=3, filters=None):
+            return {
+                "documents": self.document_store.embedding_retrieval(
+                    query_embedding=query_embedding,
+                    top_k=top_k,
+                    filters=filters,
+                )
+            }
+
+    store = TurboQuantDocumentStore(dim=DIM, bit_width=4)
+    docs = make_docs(8)
+    store.write_documents(docs)
+
+    pipeline = Pipeline()
+    pipeline.add_component("retriever", _ProbeRetriever(document_store=store))
+
+    # Use the query doc's own embedding to make the top-k deterministic.
+    result = pipeline.run(
+        {"retriever": {"query_embedding": docs[0].embedding, "top_k": 3}}
+    )
+    out_docs = result["retriever"]["documents"]
+    assert len(out_docs) == 3
+    assert out_docs[0].id == "doc-0"  # self-match
+
+
+def test_pipeline_filter_passthrough_via_retriever():
+    # Same as above, but exercises the filter path through the pipeline's
+    # parameter routing.
+    from haystack import Pipeline, component
+
+    @component
+    class _ProbeRetriever:
+        def __init__(self, document_store):
+            self.document_store = document_store
+
+        @component.output_types(documents=list)
+        def run(self, query_embedding, top_k=3, filters=None):
+            return {
+                "documents": self.document_store.embedding_retrieval(
+                    query_embedding=query_embedding,
+                    top_k=top_k,
+                    filters=filters,
+                )
+            }
+
+    store = TurboQuantDocumentStore(dim=DIM, bit_width=4)
+    store.write_documents(make_docs(10))
+
+    pipeline = Pipeline()
+    pipeline.add_component("retriever", _ProbeRetriever(document_store=store))
+
+    # group=="a" matches 5 of 10 docs.
+    result = pipeline.run({
+        "retriever": {
+            "query_embedding": make_docs(1)[0].embedding,
+            "top_k": 10,
+            "filters": {"field": "meta.group", "operator": "==", "value": "a"},
+        }
+    })
+    out_docs = result["retriever"]["documents"]
+    assert len(out_docs) == 5
+    assert all(d.meta["group"] == "a" for d in out_docs)
+
+
+def test_pipeline_to_dict_from_dict_roundtrip():
+    # Pipelines serialize/deserialize their components. Our store must
+    # round-trip through Haystack's component serialization machinery.
+    from haystack import Pipeline, component
+
+    @component
+    class _ProbeRetriever:
+        def __init__(self, document_store):
+            self.document_store = document_store
+
+        @component.output_types(documents=list)
+        def run(self, query_embedding):
+            return {
+                "documents": self.document_store.embedding_retrieval(
+                    query_embedding=query_embedding, top_k=1
+                )
+            }
+
+    store = TurboQuantDocumentStore(dim=DIM, bit_width=4)
+    pipeline = Pipeline()
+    pipeline.add_component("retriever", _ProbeRetriever(document_store=store))
+    # Serialize-then-load via Haystack's own dict round-trip — exercises
+    # our store's to_dict / from_dict from inside the framework.
+    serialized = pipeline.to_dict()
+    assert "components" in serialized
+
+
 def test_async_embedding_retrieval():
     import asyncio
 

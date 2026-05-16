@@ -625,3 +625,76 @@ def test_async_adelete_by_ref_doc_id():
         assert len(store._nodes) == 1
 
     asyncio.run(runner())
+
+
+# ------------------- End-to-end smoke tests: framework wiring -----------
+
+def test_vector_store_index_from_vector_store_retrieve():
+    # Smoke test: build a full VectorStoreIndex on top of our store and
+    # retrieve through it. This is the canonical way users plug a vector
+    # store into a LlamaIndex pipeline (RAG, query engine, etc.), so it
+    # exercises the index/retriever glue that calls query() on us from
+    # the framework side.
+    from llama_index.core import VectorStoreIndex, StorageContext
+    from llama_index.core.embeddings import MockEmbedding
+    from llama_index.core.schema import TextNode as LITextNode
+
+    embed_model = MockEmbedding(embed_dim=64)
+    store = TurboQuantVectorStore.from_params(bit_width=4)
+
+    # Build nodes with embeddings (MockEmbedding is deterministic).
+    nodes = []
+    for i, text in enumerate(["alpha doc", "beta doc", "gamma doc"]):
+        node = LITextNode(text=text, id_=f"n-{i}")
+        node.embedding = embed_model.get_text_embedding(text)
+        nodes.append(node)
+    store.add(nodes)
+
+    storage_context = StorageContext.from_defaults(vector_store=store)
+    index = VectorStoreIndex(nodes=[], storage_context=storage_context, embed_model=embed_model)
+    retriever = index.as_retriever(similarity_top_k=2)
+    results = retriever.retrieve("alpha")
+    assert len(results) == 2
+    # Returned NodeWithScore objects wrap our TextNodes.
+    assert all(r.score is not None for r in results)
+    contents = {r.node.get_content() for r in results}
+    assert contents.issubset({"alpha doc", "beta doc", "gamma doc"})
+
+
+def test_storage_context_persist_and_load_roundtrip(tmp_path):
+    # Smoke test: persist via StorageContext, reload via StorageContext.
+    # This is the path real LlamaIndex users follow, and it depends on
+    # our from_persist_dir + persist signature matching the framework's
+    # expectations.
+    from llama_index.core import VectorStoreIndex, StorageContext
+    from llama_index.core.embeddings import MockEmbedding
+    from llama_index.core.schema import TextNode as LITextNode
+
+    embed_model = MockEmbedding(embed_dim=64)
+    persist_dir = tmp_path / "storage"
+
+    # Build, persist.
+    store = TurboQuantVectorStore.from_params(bit_width=4)
+    nodes = []
+    for i, text in enumerate(["one", "two", "three"]):
+        node = LITextNode(text=text, id_=f"n-{i}")
+        node.embedding = embed_model.get_text_embedding(text)
+        nodes.append(node)
+    store.add(nodes)
+
+    storage_context = StorageContext.from_defaults(vector_store=store)
+    storage_context.persist(persist_dir=str(persist_dir))
+
+    # Reload via the from_persist_dir path.
+    reloaded_store = TurboQuantVectorStore.from_persist_dir(str(persist_dir))
+    assert len(reloaded_store._nodes) == 3
+    # Original query still works after reload.
+    storage_context2 = StorageContext.from_defaults(
+        vector_store=reloaded_store, persist_dir=str(persist_dir),
+    )
+    index = VectorStoreIndex(
+        nodes=[], storage_context=storage_context2, embed_model=embed_model,
+    )
+    retriever = index.as_retriever(similarity_top_k=2)
+    results = retriever.retrieve("one")
+    assert len(results) == 2

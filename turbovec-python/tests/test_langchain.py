@@ -416,6 +416,64 @@ def test_async_mmr_raises():
 
 # ---- Empty-store persistence round-trip (lazy index) ---------------------
 
+# ---- End-to-end smoke tests: framework wiring ---------------------------
+
+def test_as_retriever_invoke_returns_documents():
+    # Smoke test: wire the store into LangChain's VectorStoreRetriever via
+    # `as_retriever()` and run a query through the .invoke() interface.
+    # This is the canonical way users plug a VectorStore into a Chain,
+    # so it exercises the base-class wiring that calls similarity_search
+    # on our store from the framework side.
+    emb = StubEmbeddings(dim=64)
+    store = TurboQuantVectorStore.from_texts(
+        ["alpha", "beta", "gamma", "delta"],
+        emb,
+        metadatas=[{"tag": "a"}, {"tag": "b"}, {"tag": "a"}, {"tag": "b"}],
+        bit_width=4,
+    )
+    retriever = store.as_retriever(search_kwargs={"k": 2})
+    docs = retriever.invoke("alpha")
+    assert len(docs) == 2
+    assert all(isinstance(d, Document) for d in docs)
+
+
+def test_as_retriever_with_filter_kwarg():
+    # The retriever passes search_kwargs (including `filter`) through to
+    # similarity_search. This verifies the keyword reaches our store
+    # without being dropped by the base class.
+    emb = StubEmbeddings(dim=64)
+    store = TurboQuantVectorStore.from_texts(
+        ["alpha", "beta", "gamma"],
+        emb,
+        metadatas=[{"tag": "keep"}, {"tag": "drop"}, {"tag": "keep"}],
+        bit_width=4,
+    )
+    retriever = store.as_retriever(
+        search_kwargs={"k": 5, "filter": {"tag": "keep"}}
+    )
+    docs = retriever.invoke("alpha")
+    assert len(docs) == 2
+    assert all(d.metadata["tag"] == "keep" for d in docs)
+
+
+def test_as_retriever_similarity_score_threshold():
+    # `similarity_score_threshold` is the search_type that uses
+    # similarity_search_with_relevance_scores under the hood, which
+    # depends on our _select_relevance_score_fn override. If that's
+    # missing or broken, this test fails with NotImplementedError.
+    emb = StubEmbeddings(dim=64)
+    store = TurboQuantVectorStore.from_texts(
+        ["alpha", "beta", "gamma"], emb, bit_width=4
+    )
+    retriever = store.as_retriever(
+        search_type="similarity_score_threshold",
+        search_kwargs={"k": 3, "score_threshold": 0.0},
+    )
+    docs = retriever.invoke("alpha")
+    # All scores should be >= threshold (relevance in [0, 1] >= 0).
+    assert len(docs) >= 1
+
+
 def test_dump_and_load_empty_store(tmp_path):
     # When no documents have been added the underlying IdMapIndex is in
     # its lazy-uncommitted state (dim=None). dump/load must round-trip
