@@ -296,18 +296,109 @@ def test_query_filter_selective_returns_top_k_from_matches():
     assert all(n.metadata["tag"] == "needle" for n in result.nodes)
 
 
-def test_query_with_doc_ids_filter():
+def test_query_with_node_ids_filter():
+    # `node_ids` restricts to specific node_ids — matches SimpleVectorStore's
+    # canonical behaviour.
     store = TurboQuantVectorStore.from_params(dim=64, bit_width=4)
     nodes = [_make_node(f"doc {i}", seed=i) for i in range(5)]
     store.add(nodes)
-    # doc_ids restricts to specific node_ids.
     keep = [nodes[1].node_id, nodes[3].node_id]
     q = VectorStoreQuery(
-        query_embedding=_unit_vec(0, 64), similarity_top_k=5, doc_ids=keep
+        query_embedding=_unit_vec(0, 64), similarity_top_k=5, node_ids=keep
     )
     result = store.query(q)
     assert len(result.nodes) == 2
     assert {n.node_id for n in result.nodes} == set(keep)
+
+
+def test_query_with_doc_ids_filter_matches_ref_doc_id_only():
+    # `doc_ids` filters by `ref_doc_id` (source document), not node_id.
+    store = TurboQuantVectorStore.from_params(dim=64, bit_width=4)
+    nodes = [
+        _make_node(f"chunk {i}", seed=i, ref_doc_id=f"src-{i // 2}")
+        for i in range(6)
+    ]
+    store.add(nodes)
+    # Two source docs: src-0 (chunks 0, 1) and src-1 (chunks 2, 3).
+    q = VectorStoreQuery(
+        query_embedding=_unit_vec(0, 64),
+        similarity_top_k=10,
+        doc_ids=["src-0", "src-1"],
+    )
+    result = store.query(q)
+    assert len(result.nodes) == 4
+    # A bare node_id passed via doc_ids does NOT match; that's what node_ids
+    # is for.
+    q2 = VectorStoreQuery(
+        query_embedding=_unit_vec(0, 64),
+        similarity_top_k=10,
+        doc_ids=[nodes[0].node_id],
+    )
+    assert store.query(q2).nodes == []
+
+
+def test_query_with_node_ids_and_filters_intersect():
+    store = TurboQuantVectorStore.from_params(dim=64, bit_width=4)
+    nodes = [
+        _make_node(f"doc {i}", seed=i, metadata={"tier": "pro" if i % 2 else "free"})
+        for i in range(6)
+    ]
+    store.add(nodes)
+    keep = [nodes[i].node_id for i in (0, 1, 2, 3)]  # narrow to first four
+    filters = MetadataFilters(
+        filters=[MetadataFilter(key="tier", value="pro", operator=FilterOperator.EQ)]
+    )
+    q = VectorStoreQuery(
+        query_embedding=_unit_vec(0, 64),
+        similarity_top_k=10,
+        node_ids=keep,
+        filters=filters,
+    )
+    result = store.query(q)
+    # tier=="pro" → odd indices (1, 3, 5). Intersect with {0,1,2,3} → {1,3}.
+    assert {n.node_id for n in result.nodes} == {nodes[1].node_id, nodes[3].node_id}
+
+
+def test_query_ne_filter_treats_missing_key_as_no_match():
+    # Matches SimpleVectorStore reference: NE on a missing key returns False.
+    store = TurboQuantVectorStore.from_params(dim=64, bit_width=4)
+    nodes = [
+        _make_node("with", seed=0, metadata={"tier": "free"}),
+        _make_node("without", seed=1, metadata={}),  # no `tier` key
+    ]
+    store.add(nodes)
+    filters = MetadataFilters(
+        filters=[MetadataFilter(key="tier", value="pro", operator=FilterOperator.NE)]
+    )
+    q = VectorStoreQuery(
+        query_embedding=_unit_vec(0, 64), similarity_top_k=10, filters=filters
+    )
+    result = store.query(q)
+    # Only the doc with `tier=="free"` matches (free != pro). The doc with
+    # no `tier` key is NOT a match — its key is missing.
+    assert len(result.nodes) == 1
+    assert result.nodes[0].metadata.get("tier") == "free"
+
+
+def test_query_text_match_is_case_insensitive():
+    store = TurboQuantVectorStore.from_params(dim=64, bit_width=4)
+    nodes = [
+        _make_node("a", seed=0, metadata={"title": "The Lord of the Rings"}),
+        _make_node("b", seed=1, metadata={"title": "Lord of Light"}),
+        _make_node("c", seed=2, metadata={"title": "The Hobbit"}),
+    ]
+    store.add(nodes)
+    filters = MetadataFilters(
+        filters=[
+            MetadataFilter(key="title", value="LORD", operator=FilterOperator.TEXT_MATCH)
+        ]
+    )
+    q = VectorStoreQuery(
+        query_embedding=_unit_vec(0, 64), similarity_top_k=10, filters=filters
+    )
+    result = store.query(q)
+    titles = {n.metadata["title"] for n in result.nodes}
+    assert titles == {"The Lord of the Rings", "Lord of Light"}
 
 
 def test_query_unsupported_filter_operator_raises():

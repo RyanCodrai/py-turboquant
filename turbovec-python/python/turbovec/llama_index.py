@@ -155,21 +155,32 @@ class TurboQuantVectorStore(BasePydanticVectorStore):
     def _resolve_allowed_handles(
         self,
         filters: MetadataFilters | None,
+        node_ids: list[str] | None,
         doc_ids: list[str] | None,
     ) -> list[int]:
-        """Resolve ``query.filters`` and ``query.doc_ids`` to the list of
-        internal u64 handles that satisfy the filter. Empty list means no
-        node matches."""
+        """Resolve ``query.filters``, ``query.node_ids`` and ``query.doc_ids``
+        to the list of internal u64 handles that satisfy the filter. Empty
+        list means no node matches.
+
+        Semantics (matching the SimpleVectorStore reference where applicable):
+          - ``node_ids``: filter by node_id (set membership).
+          - ``doc_ids``: filter by ``ref_doc_id`` only (source document id).
+          - ``filters``: apply metadata filters.
+        All three intersect when more than one is supplied.
+        """
+        candidates = self._nodes.items()
+
+        if node_ids:
+            node_id_set = set(node_ids)
+            candidates = [(nid, data) for nid, data in candidates if nid in node_id_set]
+
         if doc_ids:
             doc_id_set = set(doc_ids)
             candidates = [
                 (nid, data)
-                for nid, data in self._nodes.items()
-                if nid in doc_id_set
-                or data.get("ref_doc_id") in doc_id_set
+                for nid, data in candidates
+                if data.get("ref_doc_id") in doc_id_set
             ]
-        else:
-            candidates = list(self._nodes.items())
 
         if filters is None:
             return [self._node_id_to_u64[nid] for nid, _ in candidates]
@@ -202,34 +213,44 @@ class TurboQuantVectorStore(BasePydanticVectorStore):
 
     @staticmethod
     def _single_filter_match(metadata: dict[str, Any], f: MetadataFilter) -> bool:
+        # Semantics mirror SimpleVectorStore's _build_metadata_filter_fn
+        # (llama_index/core/vector_stores/simple.py) so that filtered
+        # results agree with the in-tree reference store.
         op = f.operator
-        key = f.key
         target = f.value
-        present = key in metadata
-        value = metadata.get(key)
+        value = metadata.get(f.key)
+
+        # IS_EMPTY is the only operator that treats a missing key as a hit.
+        if op == FilterOperator.IS_EMPTY:
+            return value is None or value == "" or value == []
+
+        # Every other operator returns False when the key is absent — this
+        # matches the reference implementation (notably NE returns False on
+        # missing, not True).
+        if value is None:
+            return False
 
         if op == FilterOperator.EQ:
-            return present and value == target
+            return value == target
         if op == FilterOperator.NE:
-            return (not present) or value != target
+            return value != target
         if op == FilterOperator.GT:
-            return present and value > target
+            return value > target
         if op == FilterOperator.LT:
-            return present and value < target
+            return value < target
         if op == FilterOperator.GTE:
-            return present and value >= target
+            return value >= target
         if op == FilterOperator.LTE:
-            return present and value <= target
+            return value <= target
         if op == FilterOperator.IN:
-            return present and value in target
+            return value in target
         if op == FilterOperator.NIN:
-            return (not present) or value not in target
+            return value not in target
         if op == FilterOperator.TEXT_MATCH:
-            return present and str(target) in str(value)
+            # Case-insensitive, like the reference impl.
+            return str(target).lower() in str(value).lower()
         if op == FilterOperator.CONTAINS:
-            return present and target in value
-        if op == FilterOperator.IS_EMPTY:
-            return (not present) or value in (None, "", [], {}, ())
+            return target in value
         raise NotImplementedError(
             f"filter operator {op!r} not supported by TurboQuantVectorStore"
         )
@@ -249,13 +270,17 @@ class TurboQuantVectorStore(BasePydanticVectorStore):
         if len(self._index) == 0:
             return VectorStoreQueryResult(nodes=[], similarities=[], ids=[])
 
-        has_filters = query.filters is not None or bool(query.doc_ids)
+        has_filters = (
+            query.filters is not None
+            or bool(query.node_ids)
+            or bool(query.doc_ids)
+        )
         if not has_filters:
             k = min(query.similarity_top_k, len(self._index))
             scores, handles = self._index.search(qvec, k)
         else:
             allowed_handles = self._resolve_allowed_handles(
-                query.filters, query.doc_ids
+                query.filters, query.node_ids, query.doc_ids
             )
             if not allowed_handles:
                 return VectorStoreQueryResult(nodes=[], similarities=[], ids=[])

@@ -113,7 +113,7 @@ class TurboQuantVectorStore(VectorStore):
         self,
         query: str,
         k: int = 4,
-        filter: dict[str, Any] | Callable[[dict[str, Any]], bool] | None = None,
+        filter: dict[str, Any] | Callable[[Document], bool] | None = None,
         **_: Any,
     ) -> list[Document]:
         return [
@@ -125,7 +125,7 @@ class TurboQuantVectorStore(VectorStore):
         self,
         query: str,
         k: int = 4,
-        filter: dict[str, Any] | Callable[[dict[str, Any]], bool] | None = None,
+        filter: dict[str, Any] | Callable[[Document], bool] | None = None,
         **_: Any,
     ) -> list[tuple[Document, float]]:
         qvec = np.asarray(self._embedding.embed_query(query), dtype=np.float32)
@@ -135,7 +135,7 @@ class TurboQuantVectorStore(VectorStore):
         self,
         embedding: list[float],
         k: int = 4,
-        filter: dict[str, Any] | Callable[[dict[str, Any]], bool] | None = None,
+        filter: dict[str, Any] | Callable[[Document], bool] | None = None,
         **_: Any,
     ) -> list[Document]:
         qvec = np.asarray(embedding, dtype=np.float32)
@@ -145,7 +145,7 @@ class TurboQuantVectorStore(VectorStore):
         self,
         qvec: np.ndarray,
         k: int,
-        filter: dict[str, Any] | Callable[[dict[str, Any]], bool] | None = None,
+        filter: dict[str, Any] | Callable[[Document], bool] | None = None,
     ) -> list[tuple[Document, float]]:
         if qvec.ndim == 1:
             qvec = qvec[None, :]
@@ -161,8 +161,8 @@ class TurboQuantVectorStore(VectorStore):
             predicate = self._compile_filter(filter)
             allowed_handles = [
                 self._str_to_u64[sid]
-                for sid, (_text, meta) in self._docs.items()
-                if predicate(meta)
+                for sid, (text, meta) in self._docs.items()
+                if predicate(Document(page_content=text, metadata=dict(meta)))
             ]
             if not allowed_handles:
                 return []
@@ -178,16 +178,19 @@ class TurboQuantVectorStore(VectorStore):
 
     @staticmethod
     def _compile_filter(
-        filter: dict[str, Any] | Callable[[dict[str, Any]], bool],
-    ) -> Callable[[dict[str, Any]], bool]:
+        filter: dict[str, Any] | Callable[[Document], bool],
+    ) -> Callable[[Document], bool]:
+        # Match the in-tree InMemoryVectorStore convention: callable filters
+        # receive a Document, not a metadata dict
+        # (langchain_core/vectorstores/in_memory.py).
         if callable(filter):
             return filter
         if isinstance(filter, dict):
             items = list(filter.items())
-            return lambda meta: all(meta.get(k) == v for k, v in items)
+            return lambda doc: all(doc.metadata.get(k) == v for k, v in items)
         raise TypeError(
             "filter must be a dict of metadata key/value pairs or a callable "
-            f"taking a metadata dict, got {type(filter).__name__}"
+            f"taking a Document, got {type(filter).__name__}"
         )
 
     def delete(self, ids: list[str] | None = None, **_: Any) -> bool | None:

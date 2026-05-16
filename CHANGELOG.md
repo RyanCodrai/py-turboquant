@@ -60,14 +60,23 @@ appears under each surface it touches.
   `similarity_search`, `similarity_search_with_score` and
   `similarity_search_by_vector` now accept a `filter` keyword — either
   a `dict[str, Any]` of metadata key/value pairs (AND of equality), or
-  a `Callable[[dict], bool]` predicate over metadata. Previously these
-  silently ignored any filter argument via `**_`.
+  a `Callable[[Document], bool]` predicate over a langchain_core
+  `Document`. Matches the convention in `langchain_core`'s in-tree
+  `InMemoryVectorStore`. Previously these silently ignored any
+  `filter` argument via `**_`.
 - **LlamaIndex integration** (`turbovec.llama_index`): `query()` now
-  honours `VectorStoreQuery.filters` and `VectorStoreQuery.doc_ids`.
-  Supports `MetadataFilters` with the `EQ`, `NE`, `GT`, `LT`, `GTE`,
-  `LTE`, `IN`, `NIN`, `TEXT_MATCH`, `CONTAINS` and `IS_EMPTY` operators,
-  and `AND` / `OR` conditions (including nested `MetadataFilters`).
-  Unsupported operators raise `NotImplementedError` rather than
-  silently mismatching.
+  honours `VectorStoreQuery.filters`, `VectorStoreQuery.node_ids` and
+  `VectorStoreQuery.doc_ids`. `node_ids` restricts to specific node
+  ids; `doc_ids` restricts by `ref_doc_id` (source document); all
+  three intersect when more than one is supplied. Operator and
+  missing-key semantics match `SimpleVectorStore`'s reference
+  implementation — notably `NE` returns `False` on missing keys and
+  `TEXT_MATCH` is case-insensitive. Supports `MetadataFilters` with
+  the `EQ`, `NE`, `GT`, `LT`, `GTE`, `LTE`, `IN`, `NIN`, `TEXT_MATCH`,
+  `CONTAINS` and `IS_EMPTY` operators, plus `AND` / `OR` conditions
+  (including nested `MetadataFilters` — which the reference store
+  rejects). Unsupported operators (`ANY`, `ALL`,
+  `TEXT_MATCH_INSENSITIVE`) and the `NOT` condition raise
+  `NotImplementedError` rather than silently mismatching.
 
 [Unreleased]: https://github.com/RyanCodrai/turbovec/compare/v0.2.0...HEAD

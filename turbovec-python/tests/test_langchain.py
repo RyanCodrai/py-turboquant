@@ -75,6 +75,8 @@ def test_similarity_search_with_dict_filter():
 
 
 def test_similarity_search_with_callable_filter():
+    # Predicate receives a langchain_core Document (matching the in-tree
+    # InMemoryVectorStore convention), not a bare metadata dict.
     emb = StubEmbeddings(dim=64)
     store = TurboQuantVectorStore.from_texts(
         ["a", "b", "c", "d"],
@@ -83,9 +85,22 @@ def test_similarity_search_with_callable_filter():
         bit_width=4,
     )
     results = store.similarity_search(
-        "a", k=10, filter=lambda meta: meta.get("n", 0) > 2
+        "a", k=10, filter=lambda doc: doc.metadata.get("n", 0) > 2
     )
     assert {r.metadata["n"] for r in results} == {3, 4}
+
+
+def test_similarity_search_callable_filter_can_use_page_content():
+    # Document is passed to the predicate, so page_content is reachable.
+    emb = StubEmbeddings(dim=64)
+    store = TurboQuantVectorStore.from_texts(
+        ["alpha", "beta", "alphabet"], emb, bit_width=4,
+    )
+    results = store.similarity_search(
+        "alpha", k=10, filter=lambda doc: doc.page_content.startswith("alpha")
+    )
+    contents = {r.page_content for r in results}
+    assert contents == {"alpha", "alphabet"}
 
 
 def test_similarity_search_filter_with_scores():
