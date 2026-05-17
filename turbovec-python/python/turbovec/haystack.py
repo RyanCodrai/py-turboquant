@@ -12,8 +12,8 @@ full-precision embeddings after compression — callers that rely on
 from __future__ import annotations
 
 import asyncio
+import json
 import math
-import pickle
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple
@@ -555,48 +555,57 @@ class TurboQuantDocumentStore:
 
     # ---- Persistence -------------------------------------------------
 
+    # Side-car schema. Bump when the on-disk shape changes; loader
+    # checks it and refuses to deserialize unknown versions.
+    _DOCSTORE_SCHEMA_VERSION = 1
+
     def save_to_disk(self, folder_path: str | Path) -> None:
         """Persist the quantized index plus the Haystack side-car to disk.
 
         Writes into ``folder_path``:
           - ``index.tvim`` — the :class:`IdMapIndex` payload. On a lazy
             store that has never seen a write the file encodes the
-            uncommitted state via a ``dim=0`` sentinel; no special-case
-            handling needed here.
-          - ``docstore.pkl`` — the str-id ↔ Document mapping and store
-            init parameters.
+            uncommitted state via a ``dim=0`` sentinel.
+          - ``docstore.json`` — the str-id ↔ Document mapping and store
+            init parameters, JSON-encoded. Document metadata must be
+            JSON-serializable (the same constraint as
+            ``InMemoryDocumentStore.save_to_disk``).
         """
         folder = Path(folder_path)
         folder.mkdir(parents=True, exist_ok=True)
         self._index.write(str(folder / "index.tvim"))
-        with open(folder / "docstore.pkl", "wb") as f:
-            pickle.dump(
-                {
-                    "u64_to_doc": self._u64_to_doc,
-                    "next_u64": self._next_u64,
-                    "bit_width": self._bit_width,
-                    "embedding_similarity_function": self.embedding_similarity_function,
-                    "return_embedding": self.return_embedding,
-                },
-                f,
-            )
+        # Keys in `_u64_to_doc` are ints (u64 handles); JSON object keys
+        # must be strings. Serialize as a list of [handle, data] pairs
+        # so we don't lose type fidelity on the round-trip.
+        payload = {
+            "schema_version": self._DOCSTORE_SCHEMA_VERSION,
+            "u64_to_doc": [[h, d] for h, d in self._u64_to_doc.items()],
+            "next_u64": self._next_u64,
+            "bit_width": self._bit_width,
+            "embedding_similarity_function": self.embedding_similarity_function,
+            "return_embedding": self.return_embedding,
+        }
+        with open(folder / "docstore.json", "w") as f:
+            json.dump(payload, f)
 
     @classmethod
     def load_from_disk(
         cls,
         folder_path: str | Path,
-        *,
-        allow_dangerous_deserialization: bool = False,
     ) -> "TurboQuantDocumentStore":
-        if not allow_dangerous_deserialization:
-            raise ValueError(
-                "load_from_disk uses pickle, which is unsafe with untrusted input. "
-                "Pass allow_dangerous_deserialization=True to confirm you "
-                "trust the source of folder_path."
-            )
+        """Reload a store from a folder previously written by
+        :meth:`save_to_disk`. Safe to call on any path — the side-car is
+        plain JSON, never pickle, so there's no deserialization-of-code
+        risk."""
         folder = Path(folder_path)
-        with open(folder / "docstore.pkl", "rb") as f:
-            state = pickle.load(f)
+        with open(folder / "docstore.json") as f:
+            state = json.load(f)
+        version = state.get("schema_version", 0)
+        if version != cls._DOCSTORE_SCHEMA_VERSION:
+            raise ValueError(
+                f"docstore.json has schema version {version}; "
+                f"this turbovec expects version {cls._DOCSTORE_SCHEMA_VERSION}"
+            )
         store = cls(
             bit_width=state["bit_width"],
             embedding_similarity_function=state.get(
@@ -607,7 +616,8 @@ class TurboQuantDocumentStore:
         # Reload the index — it carries dim internally (None for lazy
         # uncommitted, int otherwise).
         store._index = IdMapIndex.load(str(folder / "index.tvim"))
-        store._u64_to_doc = state["u64_to_doc"]
+        # Reconstruct {int handle: doc data} from the list-of-pairs form.
+        store._u64_to_doc = {int(h): d for h, d in state["u64_to_doc"]}
         store._next_u64 = state["next_u64"]
         # Rebuild str_to_u64 from the reloaded doc table.
         store._str_to_u64 = {

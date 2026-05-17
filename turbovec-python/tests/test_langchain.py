@@ -178,19 +178,39 @@ def test_dump_and_load_roundtrip(tmp_path):
     )
     store.dump(tmp_path)
 
-    loaded = TurboQuantVectorStore.load(
-        tmp_path, emb, allow_dangerous_deserialization=True
-    )
+    loaded = TurboQuantVectorStore.load(tmp_path, emb)
     assert len(loaded._docs) == 3
     results = loaded.similarity_search("one", k=3)
     assert {doc.page_content for doc in results} == {"one", "two", "three"}
 
 
-def test_load_refuses_without_flag(tmp_path):
+def test_dump_writes_json_sidecar(tmp_path):
+    # Side-car is plain JSON. A reviewer auditing a turbovec-saved store
+    # should be able to read it with a text editor.
+    import json
+
     emb = StubEmbeddings(dim=64)
     store = TurboQuantVectorStore.from_texts(["x"], emb, bit_width=4)
     store.dump(tmp_path)
-    with pytest.raises(ValueError, match="allow_dangerous_deserialization"):
+    assert (tmp_path / "docstore.json").exists()
+    assert not (tmp_path / "docstore.pkl").exists()
+    with open(tmp_path / "docstore.json") as f:
+        data = json.load(f)
+    assert data["schema_version"] >= 1
+
+
+def test_load_rejects_unknown_schema_version(tmp_path):
+    import json
+
+    emb = StubEmbeddings(dim=64)
+    store = TurboQuantVectorStore.from_texts(["x"], emb, bit_width=4)
+    store.dump(tmp_path)
+    with open(tmp_path / "docstore.json") as f:
+        data = json.load(f)
+    data["schema_version"] = 99
+    with open(tmp_path / "docstore.json", "w") as f:
+        json.dump(data, f)
+    with pytest.raises(ValueError, match="schema version"):
         TurboQuantVectorStore.load(tmp_path, emb)
 
 
@@ -481,9 +501,7 @@ def test_dump_and_load_empty_store(tmp_path):
     emb = StubEmbeddings(dim=64)
     store = TurboQuantVectorStore(emb, bit_width=2)
     store.dump(tmp_path)
-    loaded = TurboQuantVectorStore.load(
-        tmp_path, emb, allow_dangerous_deserialization=True
-    )
+    loaded = TurboQuantVectorStore.load(tmp_path, emb)
     assert loaded._index.dim is None
     assert loaded._index.bit_width == 2
     # Subsequent search returns empty; subsequent add commits the dim.

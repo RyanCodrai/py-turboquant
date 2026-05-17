@@ -176,16 +176,20 @@ appears under each surface it touches.
     `from_persist_dir(persist_dir, namespace, fs)` matching the
     reference's namespaced-filename convention, so
     `StorageContext.from_defaults(persist_dir=...)` works. The
-    `persist` / `from_persist_path` on-disk layout changed within this
-    branch: `persist_path` is now a path *stem* and we write
-    `{stem}.tvim` + `{stem}.pkl` next to each other (was: a directory
-    containing two files at fixed names). This fits StorageContext's
+    `persist` / `from_persist_path` on-disk layout is now stem-based:
+    `persist_path` is a path *stem* and we write `{stem}.tvim` +
+    `{stem}.nodes.json` next to each other. This fits StorageContext's
     file-shaped paths and lets multiple namespaced stores share a
-    directory. **Breaking within the branch** — anyone tracking an
-    earlier commit on this branch must repersist.
-  - Dropped the `allow_dangerous_deserialization` flag on
-    `from_persist_path`. The reference doesn't have one and requiring
-    it broke seamless StorageContext flows. The pickle risk is now
-    documented on `persist` and `from_persist_path` docstrings.
+    directory.
+
+- **JSON side-cars across all three integrations.** Haystack, LangChain
+  and LlamaIndex persistence now writes a plain-JSON side-car next to
+  the binary `IdMapIndex` payload instead of a pickle. The
+  `allow_dangerous_deserialization` flag is gone everywhere — loading
+  is safe regardless of file provenance. Document / node metadata must
+  be JSON-serializable, which matches the constraint the reference
+  in-tree stores already impose. The side-car carries a
+  `schema_version` field; loaders reject unknown versions instead of
+  silently misinterpreting bytes.
 
 [Unreleased]: https://github.com/RyanCodrai/turbovec/compare/v0.2.0...HEAD

@@ -221,9 +221,7 @@ def test_save_and_load_roundtrip(tmp_path):
 
     store.save_to_disk(tmp_path)
 
-    restored = TurboQuantDocumentStore.load_from_disk(
-        tmp_path, allow_dangerous_deserialization=True
-    )
+    restored = TurboQuantDocumentStore.load_from_disk(tmp_path)
     assert restored.count_documents() == 4
     # Every surviving id self-retrieves correctly.
     for doc in docs:
@@ -235,11 +233,34 @@ def test_save_and_load_roundtrip(tmp_path):
         assert results[0].id == doc.id
 
 
-def test_load_refuses_without_flag(tmp_path):
+def test_save_writes_json_sidecar(tmp_path):
+    # Side-car is plain JSON now, not pickle. A reviewer auditing a
+    # turbovec-saved store should be able to read it with a text editor.
+    import json
+
     store = TurboQuantDocumentStore(dim=DIM, bit_width=4)
     store.write_documents(make_docs(2))
     store.save_to_disk(tmp_path)
-    with pytest.raises(ValueError, match="allow_dangerous_deserialization"):
+    assert (tmp_path / "docstore.json").exists()
+    assert not (tmp_path / "docstore.pkl").exists()
+    with open(tmp_path / "docstore.json") as f:
+        data = json.load(f)
+    assert data["schema_version"] >= 1
+
+
+def test_load_rejects_unknown_schema_version(tmp_path):
+    import json
+
+    store = TurboQuantDocumentStore(dim=DIM, bit_width=4)
+    store.write_documents(make_docs(1))
+    store.save_to_disk(tmp_path)
+    # Hand-bump the schema version to something unknown.
+    with open(tmp_path / "docstore.json") as f:
+        data = json.load(f)
+    data["schema_version"] = 99
+    with open(tmp_path / "docstore.json", "w") as f:
+        json.dump(data, f)
+    with pytest.raises(ValueError, match="schema version"):
         TurboQuantDocumentStore.load_from_disk(tmp_path)
 
 
@@ -497,9 +518,7 @@ def test_dump_and_load_empty_lazy_store(tmp_path):
     # store whose index is still in its lazy uncommitted state.
     store = TurboQuantDocumentStore(bit_width=2)
     store.save_to_disk(tmp_path)
-    loaded = TurboQuantDocumentStore.load_from_disk(
-        tmp_path, allow_dangerous_deserialization=True
-    )
+    loaded = TurboQuantDocumentStore.load_from_disk(tmp_path)
     assert loaded._index.dim is None
     assert loaded._bit_width == 2
     # Subsequent retrieval is empty; subsequent write commits the dim.

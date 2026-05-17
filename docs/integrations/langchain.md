@@ -128,21 +128,17 @@ Delete is O(1) per id. `delete(None)` is a no-op (matches the `InMemoryVectorSto
 ```python
 store.dump("./my-store")
 # ... later ...
-store = TurboQuantVectorStore.load(
-    "./my-store",
-    embedding=embeddings,
-    allow_dangerous_deserialization=True,  # required — side-car is pickle
-)
+store = TurboQuantVectorStore.load("./my-store", embedding=embeddings)
 ```
 
 Writes two files under the given folder path:
 - `index.tvim` — the `IdMapIndex` payload (see [api.md](../api.md#tvim--idmapindex)).
-- `docstore.pkl` — a pickled dictionary of document text, metadata, and id maps.
+- `docstore.json` — JSON-encoded document text, metadata, and id maps.
 
-The `allow_dangerous_deserialization` flag is required because unpickling untrusted data is unsafe. Only load files you produced yourself or trust the source of.
+Document metadata must be JSON-serializable — the same constraint `InMemoryVectorStore.dump` imposes.
 
 ## Known limitations
 
 - **Max-marginal-relevance search is not supported.** `max_marginal_relevance_search` and its variants raise `NotImplementedError` with an explanation. MMR requires the full-precision embedding of each candidate to compute pairwise diversity; turbovec discards full-precision vectors after quantization. If you need MMR, keep a parallel store with the raw embeddings and run MMR over that.
 - **Embeddings are not retained.** `search` returns `Document` objects with `page_content` and `metadata`, but the original embedding is not recoverable.
-- **Pickle side-car.** `load` requires `allow_dangerous_deserialization=True` because the document side-car is pickled. We may migrate to a safer format in a future major version.
+- **JSON-serializable metadata only.** Non-JSON-serializable values (custom objects, sets, etc.) fail at save time — same constraint as the in-tree reference store.

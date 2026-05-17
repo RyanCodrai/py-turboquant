@@ -5,8 +5,8 @@ Install with: ``pip install turbovec[llama-index]``.
 
 from __future__ import annotations
 
+import json
 import os
-import pickle
 from pathlib import Path
 from typing import Any, List, Optional, Sequence
 
@@ -41,25 +41,29 @@ except ImportError as exc:
 
 # Persistence layout: a single user-facing ``persist_path`` (the file the
 # framework asks us to write) is split into two files by extension —
-# ``{base}.tvim`` for the binary IdMapIndex and ``{base}.pkl`` for the
-# node side-car. Both live next to each other so the layout fits the
+# ``{base}.tvim`` for the binary IdMapIndex and ``{base}.nodes.json`` for
+# the node side-car. Both live next to each other so the layout fits the
 # directory-of-namespaced-files pattern used by StorageContext.
 _INDEX_EXT = ".tvim"
-_STORE_EXT = ".pkl"
+_STORE_EXT = ".nodes.json"
 # Filename template used by SimpleVectorStore for namespace lookup —
 # mirrored here so `from_persist_dir` works the same way.
 _NAMESPACE_SEP = "__"
 _DEFAULT_PERSIST_FNAME = "vector_store.json"
 _DEFAULT_VECTOR_STORE = "default"
+# Bump when the nodes.json shape changes; loader refuses to deserialize
+# unknown versions.
+_NODES_SCHEMA_VERSION = 1
 
 
 def _split_persist_base(persist_path: str | Path) -> Path:
     """Strip the framework-provided extension off `persist_path` so the
-    binary index and pickle side-car can sit next to each other under a
-    shared base. We then append our own extensions in dump / load."""
+    binary index and JSON side-car can sit next to each other under a
+    shared base. We then append our own extensions in persist / load."""
     p = Path(persist_path)
-    # Use the path without its suffix so both .tvim and .pkl share a base.
-    # If the input has no suffix (e.g. a bare folder-like name), use it as-is.
+    # Use the path without its suffix so both .tvim and .nodes.json share
+    # a base. If the input has no suffix (e.g. a bare folder-like name),
+    # use it as-is.
     return p.with_suffix("") if p.suffix else p
 
 
@@ -482,16 +486,16 @@ class TurboQuantVectorStore(BasePydanticVectorStore):
     def persist(self, persist_path: str, fs: Any = None) -> None:
         """Persist the store. ``persist_path`` is treated as a path *stem*:
         the binary index goes to ``{stem}.tvim`` and the node side-car to
-        ``{stem}.pkl``. Any extension on ``persist_path`` (e.g. ``.json``
-        from a StorageContext default) is replaced.
+        ``{stem}.nodes.json``. Any extension on ``persist_path`` (e.g.
+        ``.json`` from a StorageContext default) is replaced.
 
         This matches the layout assumed by ``StorageContext.persist`` —
         which calls us with ``persist_path = {persist_dir}/{namespace}__vector_store.json`` —
         and lets multiple namespaced stores coexist in the same directory.
 
-        ``fs`` (fsspec) is not yet supported; pass a local path.
-
-        Note: the pickle side-car is unsafe to load from untrusted sources.
+        Node metadata must be JSON-serializable (same constraint as
+        ``SimpleVectorStore``). ``fs`` (fsspec) is not yet supported;
+        pass a local path.
         """
         if fs is not None:
             raise NotImplementedError(
@@ -500,15 +504,17 @@ class TurboQuantVectorStore(BasePydanticVectorStore):
         base = _split_persist_base(persist_path)
         base.parent.mkdir(parents=True, exist_ok=True)
         self._index.write(str(base.with_suffix(_INDEX_EXT)))
-        with open(base.with_suffix(_STORE_EXT), "wb") as f:
-            pickle.dump(
-                {
-                    "nodes": self._nodes,
-                    "node_id_to_u64": self._node_id_to_u64,
-                    "next_u64": self._next_u64,
-                },
-                f,
-            )
+        payload = {
+            "schema_version": _NODES_SCHEMA_VERSION,
+            "nodes": self._nodes,
+            # JSON object keys must be strings; round-trip int keys via
+            # an explicit list of [node_id, handle] pairs to preserve
+            # type fidelity.
+            "node_id_to_u64": list(self._node_id_to_u64.items()),
+            "next_u64": self._next_u64,
+        }
+        with open(base.with_suffix(_STORE_EXT), "w") as f:
+            json.dump(payload, f)
 
     @classmethod
     def from_persist_path(
@@ -518,11 +524,10 @@ class TurboQuantVectorStore(BasePydanticVectorStore):
     ) -> "TurboQuantVectorStore":
         """Load a previously-persisted store. ``persist_path`` is the same
         path that was passed to :meth:`persist` (extension is ignored;
-        ``{stem}.tvim`` and ``{stem}.pkl`` are read).
+        ``{stem}.tvim`` and ``{stem}.nodes.json`` are read).
 
-        Note: this deserializes a pickle side-car, which is unsafe to load
-        from untrusted sources. Only call on persist paths produced by
-        ``persist`` on a store you control.
+        Safe to call on any path — the side-car is plain JSON, never
+        pickle, so there's no deserialization-of-code risk.
         """
         if fs is not None:
             raise NotImplementedError(
@@ -530,13 +535,20 @@ class TurboQuantVectorStore(BasePydanticVectorStore):
             )
         base = _split_persist_base(persist_path)
         index = IdMapIndex.load(str(base.with_suffix(_INDEX_EXT)))
-        with open(base.with_suffix(_STORE_EXT), "rb") as f:
-            state = pickle.load(f)
+        with open(base.with_suffix(_STORE_EXT)) as f:
+            state = json.load(f)
+        version = state.get("schema_version", 0)
+        if version != _NODES_SCHEMA_VERSION:
+            raise ValueError(
+                f"{_STORE_EXT.lstrip('.')} has schema version {version}; "
+                f"this turbovec expects version {_NODES_SCHEMA_VERSION}"
+            )
         store = cls(index=index)
         store._nodes = state["nodes"]
-        store._node_id_to_u64 = state["node_id_to_u64"]
-        store._u64_to_node_id = {h: nid for nid, h in state["node_id_to_u64"].items()}
-        store._next_u64 = state["next_u64"]
+        # Reconstruct {node_id: int handle} from the list-of-pairs form.
+        store._node_id_to_u64 = {nid: int(h) for nid, h in state["node_id_to_u64"]}
+        store._u64_to_node_id = {h: nid for nid, h in store._node_id_to_u64.items()}
+        store._next_u64 = int(state["next_u64"])
         return store
 
     @classmethod

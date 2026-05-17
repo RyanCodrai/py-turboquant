@@ -178,7 +178,7 @@ vector_store.persist("./store/vectors.json")
 vector_store = TurboQuantVectorStore.from_persist_path("./store/vectors.json")
 ```
 
-`persist_path` is treated as a path *stem* — the binary index and pickle side-car are written next to each other as `{stem}.tvim` and `{stem}.pkl`. The extension on `persist_path` (e.g. `.json`, as LlamaIndex's StorageContext default uses) is replaced.
+`persist_path` is treated as a path *stem* — the binary index and JSON side-car are written next to each other as `{stem}.tvim` and `{stem}.nodes.json`. The extension on `persist_path` (e.g. `.json`, as LlamaIndex's StorageContext default uses) is replaced. Node metadata must be JSON-serializable.
 
 ### Via `StorageContext`
 
@@ -212,5 +212,5 @@ fresh = TurboQuantVectorStore.from_dict(config)                   # empty store 
 - **MMR is not supported.** Max-marginal-relevance retrieval requires the full-precision embedding of each candidate to compute pairwise diversity; turbovec discards full-precision vectors after quantization.
 - **`get(text_id)` raises** rather than returning a vector — same reason. The full-precision embedding is not recoverable.
 - **`fsspec` filesystems are not supported.** `persist`, `from_persist_path`, and `from_persist_dir` accept a local path. Pass `fs=None` (the default).
-- **Pickle side-car.** The node side-car is pickled. The pickle risk is real — only load persist paths you produced yourself or trust the source of.
+- **JSON-serializable metadata only.** Node metadata is stored as JSON in the side-car. Non-JSON-serializable values fail at persist time — same constraint as `SimpleVectorStore.persist`.
 - **`stores_text = True`.** Unlike `SimpleVectorStore`, we keep node text in the side-car so query results return populated `TextNode`s without depending on a separate docstore. If you're swapping this in for `SimpleVectorStore` and your pipeline expects text to live elsewhere, the difference is harmless — the framework treats `stores_text` as informational.

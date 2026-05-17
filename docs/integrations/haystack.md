@@ -133,17 +133,14 @@ By default they run on a single-threaded executor owned by the store. Pass an `a
 ```python
 store.save_to_disk("./my-store")
 # ... later ...
-store = TurboQuantDocumentStore.load_from_disk(
-    "./my-store",
-    allow_dangerous_deserialization=True,
-)
+store = TurboQuantDocumentStore.load_from_disk("./my-store")
 ```
 
 Writes two files under the given folder path:
 - `index.tvim` — the `IdMapIndex` payload (quantized vectors + id maps).
-- `docstore.pkl` — pickled document text and metadata.
+- `docstore.json` — JSON-encoded document text, metadata, and id maps.
 
-The `allow_dangerous_deserialization` flag is required because unpickling untrusted data is unsafe.
+Document metadata must be JSON-serializable — the same constraint `InMemoryDocumentStore.save_to_disk` imposes.
 
 ## Using in a Haystack Pipeline
 
@@ -170,5 +167,5 @@ indexing.run({"embedder": {"documents": my_docs}})
 ## Known limitations
 
 - **Embeddings are not retained.** `embedding_retrieval(..., return_embedding=True)` is accepted for signature compatibility but `Document.embedding` is always `None` on retrieved docs — turbovec discards the full-precision vector after quantization.
-- **Pickle side-car.** `load_from_disk` requires `allow_dangerous_deserialization=True` because the document side-car is pickled.
+- **JSON-serializable metadata only.** Document metadata is stored as JSON in the side-car. Non-JSON-serializable values (custom objects, sets, etc.) fail at save time — the same constraint `InMemoryDocumentStore.save_to_disk` imposes.
 - **`dim` is locked on the first add.** Subsequent calls with a different shape raise `ValueError`. If you need to change `dim`, construct a fresh store.

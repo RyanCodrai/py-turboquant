@@ -8,7 +8,7 @@ so this store can be swapped in wherever the in-memory store is used.
 
 from __future__ import annotations
 
-import pickle
+import json
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
@@ -29,7 +29,10 @@ except ImportError as exc:
 
 
 _INDEX_FILENAME = "index.tvim"
-_STORE_FILENAME = "docstore.pkl"
+_STORE_FILENAME = "docstore.json"
+# Bump when the docstore.json shape changes; loader refuses to deserialize
+# unknown versions.
+_DOCSTORE_SCHEMA_VERSION = 1
 
 
 class TurboQuantVectorStore(VectorStore):
@@ -451,64 +454,79 @@ class TurboQuantVectorStore(VectorStore):
     # ---- Persistence --------------------------------------------------
     #
     # Method names match the InMemoryVectorStore reference (`dump`/`load`),
-    # but the on-disk layout is a directory containing the binary index
-    # file plus a pickle side-car (we can't embed the binary Rust index in
-    # a single JSON file the way the reference can with its raw-vector
+    # but the on-disk layout is a folder containing the binary index file
+    # plus a JSON side-car (we can't embed the binary Rust index in a
+    # single JSON file the way the reference does with its raw-vector
     # store).
 
     def dump(self, folder_path: str | Path) -> None:
         """Persist the quantized index plus the side-car to disk.
 
-        ``folder_path`` is a directory; turbovec writes ``index.tvim`` and
-        ``docstore.pkl`` inside it. This differs from the
-        ``InMemoryVectorStore`` reference (which writes a single JSON
-        file) because the binary index can't be losslessly embedded in
-        JSON. A lazy-uncommitted index encodes its state via the index
-        file's own dim=0 sentinel; no special-case handling needed here.
+        ``folder_path`` is a directory; turbovec writes ``index.tvim``
+        and ``docstore.json`` inside it. Document metadata must be
+        JSON-serializable (same constraint as ``InMemoryVectorStore``).
+        A lazy uncommitted index encodes its state via the index file's
+        own ``dim = 0`` sentinel; no special-case handling needed here.
         """
         folder = Path(folder_path)
         folder.mkdir(parents=True, exist_ok=True)
         self._index.write(str(folder / _INDEX_FILENAME))
-        with open(folder / _STORE_FILENAME, "wb") as f:
-            pickle.dump(
-                {
-                    "docs": self._docs,
-                    "str_to_u64": self._str_to_u64,
-                    "next_u64": self._next_u64,
-                    # Pull bit_width off the live index — same value
-                    # whether the index was eager or lazy.
-                    "bit_width": self._index.bit_width,
-                },
-                f,
-            )
+        # `_docs` stores tuples `(text, metadata)` — JSON would drop the
+        # tuple-ness on round-trip, so serialize each entry as an explicit
+        # `{"text": ..., "metadata": ...}` dict.
+        docs_payload = {
+            sid: {"text": text, "metadata": meta}
+            for sid, (text, meta) in self._docs.items()
+        }
+        payload = {
+            "schema_version": _DOCSTORE_SCHEMA_VERSION,
+            "docs": docs_payload,
+            "str_to_u64": self._str_to_u64,
+            "next_u64": self._next_u64,
+            # Pull bit_width off the live index — same value whether
+            # the index was constructed eagerly or lazily.
+            "bit_width": self._index.bit_width,
+        }
+        with open(folder / _STORE_FILENAME, "w") as f:
+            json.dump(payload, f)
 
     @classmethod
     def load(
         cls,
         folder_path: str | Path,
         embedding: Embeddings,
-        *,
-        allow_dangerous_deserialization: bool = False,
     ) -> "TurboQuantVectorStore":
-        if not allow_dangerous_deserialization:
-            raise ValueError(
-                "load uses pickle to deserialize the document store, which is "
-                "unsafe with untrusted input. Pass allow_dangerous_deserialization=True "
-                "to confirm you trust the source of folder_path."
-            )
+        """Reload a store from a folder previously written by :meth:`dump`.
+        Safe to call on any path — the side-car is plain JSON, never
+        pickle, so there's no deserialization-of-code risk."""
         folder = Path(folder_path)
-        with open(folder / _STORE_FILENAME, "rb") as f:
-            state = pickle.load(f)
+        with open(folder / _STORE_FILENAME) as f:
+            state = json.load(f)
+        version = state.get("schema_version", 0)
+        if version != _DOCSTORE_SCHEMA_VERSION:
+            raise ValueError(
+                f"docstore.json has schema version {version}; "
+                f"this turbovec expects version {_DOCSTORE_SCHEMA_VERSION}"
+            )
         # IdMapIndex.load handles the dim=0 (lazy-uncommitted) sentinel
         # internally and reconstructs the index in the right state.
         index = IdMapIndex.load(str(folder / _INDEX_FILENAME))
+        # Rehydrate `_docs` from the explicit `{"text", "metadata"}` form
+        # back into the internal tuple representation.
+        docs = {
+            sid: (entry["text"], entry["metadata"])
+            for sid, entry in state["docs"].items()
+        }
+        # JSON object keys are strings; the str_to_u64 values are already
+        # ints in the payload, just need to confirm.
+        str_to_u64 = {sid: int(h) for sid, h in state["str_to_u64"].items()}
         return cls(
             embedding=embedding,
             index=index,
             bit_width=state.get("bit_width", 4),
-            docs=state["docs"],
-            str_to_u64=state["str_to_u64"],
-            next_u64=state["next_u64"],
+            docs=docs,
+            str_to_u64=str_to_u64,
+            next_u64=int(state["next_u64"]),
         )
 
 
