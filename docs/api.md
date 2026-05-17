@@ -27,17 +27,26 @@ idx.write("index.tv")                   # .tv format
 loaded = TurboQuantIndex.load("index.tv")
 ```
 
+`dim` is optional. Omit it to let the index pick up the dimensionality from the first batch of vectors:
+
+```python
+idx = TurboQuantIndex(bit_width=4)      # dim inferred on first add
+idx.add(vectors)                         # locks dim to vectors.shape[1]
+```
+
+Before the first add, `idx.dim` is `None`, `len(idx)` is `0`, and `search()` returns empty results.
+
 ### Methods
 
 | Method | Notes |
 |---|---|
-| `TurboQuantIndex(dim, bit_width)` | `bit_width ∈ {2, 4}` |
-| `add(vectors)` | `vectors` must be contiguous float32 `(n, dim)`. |
+| `TurboQuantIndex(dim=None, bit_width=4)` | `bit_width ∈ {2, 4}`. `dim` is optional; when omitted it is inferred from the first `add` call. |
+| `add(vectors)` | `vectors` is a contiguous float32 array of shape `(n, dim)`. On a lazy index the first call locks `dim`; subsequent calls must match. |
 | `search(queries, k, *, mask=None)` | Returns `(scores, indices)`, both shape `(nq, effective_k)`. Indices are `int64` slot positions. `mask` is an optional `bool` array of length `len(idx)`; when given, only slots with `mask[i] == True` contribute. `effective_k = min(k, mask.sum())`. |
 | `swap_remove(idx)` | O(1). Moves the last vector into `idx`; returns the previous position of that moved vector (so external refs can be updated if needed). |
-| `prepare()` | Optional. Eagerly builds the rotation matrix, Lloyd-Max centroids and SIMD-blocked layout so the first `search` call doesn't pay the one-time cost. |
+| `prepare()` | Optional. Eagerly builds the rotation matrix, Lloyd-Max centroids and SIMD-blocked layout so the first `search` call doesn't pay the one-time cost. No-op on a lazy index that hasn't seen its first add. |
 | `write(path)` / `load(path)` | `.tv` format. |
-| `len(idx)` / `idx.dim` / `idx.bit_width` | Introspection. |
+| `len(idx)` / `idx.dim` / `idx.bit_width` | Introspection. `idx.dim` returns `int` once committed, or `None` on a lazy index that hasn't seen its first add. |
 
 ### `swap_remove` semantics
 
@@ -67,12 +76,19 @@ idx.write("index.tvim")                    # .tvim format
 loaded = IdMapIndex.load("index.tvim")
 ```
 
+As with [`TurboQuantIndex`](#turboquantindex), `dim` is optional and gets inferred from the first `add_with_ids` call:
+
+```python
+idx = IdMapIndex(bit_width=4)            # dim inferred on first add
+idx.add_with_ids(vectors, ids)           # locks dim to vectors.shape[1]
+```
+
 ### Methods
 
 | Method | Notes |
 |---|---|
-| `IdMapIndex(dim, bit_width)` | |
-| `add_with_ids(vectors, ids)` | `ids` is a `uint64` array with length `vectors.shape[0]`. Rejects duplicate ids (raises). |
+| `IdMapIndex(dim=None, bit_width=4)` | `dim` is optional; when omitted it is inferred from the first `add_with_ids` call. |
+| `add_with_ids(vectors, ids)` | `ids` is a `uint64` array with length `vectors.shape[0]`. Rejects duplicate ids (raises). On a lazy index the first call locks `dim`. |
 | `remove(id) -> bool` | `True` if the id was present and removed, `False` otherwise. O(1). |
 | `search(queries, k, *, allowlist=None)` | Returns `(scores, ids)` — `ids` are `uint64` external ids. `allowlist` is an optional `uint64` array of ids; when given, results are restricted to those ids and `effective_k = min(k, len(allowlist))`. Raises `ValueError` on empty allowlist and `KeyError` on unknown ids. |
 | `contains(id)` / `id in idx` | Membership. |
@@ -146,5 +162,7 @@ Common use cases:
 ```
 
 On load, the reverse `id → slot` map is rebuilt in memory. Duplicate ids in the `slot_to_id` table are rejected as corrupt.
+
+`dim = 0` in the header signals a lazy uncommitted index (the constructor asserts `dim ≥ 8` so this value is unambiguous). `dim = 0` is only valid alongside `n_vectors = 0`; on load it produces an index whose `dim` is `None` until the first `add` / `add_with_ids` call.
 
 Both formats are stable across minor versions. Breaking changes bump the file-format version byte (`.tvim`) or the header length (`.tv`).
