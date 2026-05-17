@@ -83,8 +83,24 @@ docs = store.similarity_search_by_vector(qvec.tolist(), k=5)
 
 Scores are raw inner products. Because vectors are L2-normalized on insert, inner product equals cosine similarity — higher is better, range `[-1, 1]`.
 
+## Metadata filtering
+
+Pass a `filter` dict to any search method. Keys are metadata field names; values are either a single value (exact match) or a list (match any).
+
+```python
+# Exact match
+docs = store.similarity_search("query", k=5, filter={"tenant": "acme"})
+
+# Match any value in list
+docs = store.similarity_search("query", k=5, filter={"source": ["web", "pdf"]})
+
+# Multiple conditions (AND)
+docs = store.similarity_search("query", k=5, filter={"tenant": "acme", "year": 2025})
+```
+
+Filtering is applied post-retrieval with over-fetching (10x `k`) to maintain result count. For very restrictive filters on large corpora, results may be fewer than `k`.
+
 ## Known limitations
 
-- **No first-class metadata filtering.** LangChain's `VectorStore` interface doesn't standardize filter predicates. If you need filtered search, use the Haystack integration (which exposes a filter DSL).
 - **Embeddings are dropped after quantization.** `search` returns `Document` objects with `page_content` and `metadata`, but not the original embedding.
 - **Side-car is pickle.** We may migrate to a safer format in a future major version; for now, treat `allow_dangerous_deserialization=True` as mandatory reading.

@@ -162,3 +162,80 @@ def test_mismatched_dim_raises():
     store = TurboQuantVectorStore(emb, index=IdMapIndex(32, 4))
     with pytest.raises(ValueError, match="embedding dimension"):
         store.add_texts(["hi"])
+
+
+def test_filter_by_exact_match():
+    emb = StubEmbeddings(dim=64)
+    store = TurboQuantVectorStore.from_texts(
+        ["doc1", "doc2", "doc3"],
+        emb,
+        metadatas=[
+            {"source": "web", "tenant": "acme"},
+            {"source": "pdf", "tenant": "acme"},
+            {"source": "web", "tenant": "globex"},
+        ],
+        bit_width=4,
+    )
+    results = store.similarity_search("doc1", k=10, filter={"tenant": "acme"})
+    assert len(results) == 2
+    assert all(doc.metadata["tenant"] == "acme" for doc in results)
+
+
+def test_filter_by_list_value():
+    emb = StubEmbeddings(dim=64)
+    store = TurboQuantVectorStore.from_texts(
+        ["a", "b", "c", "d"],
+        emb,
+        metadatas=[
+            {"category": "finance"},
+            {"category": "tech"},
+            {"category": "health"},
+            {"category": "finance"},
+        ],
+        bit_width=4,
+    )
+    results = store.similarity_search(
+        "a", k=10, filter={"category": ["finance", "tech"]}
+    )
+    assert len(results) == 3
+    assert all(doc.metadata["category"] in ["finance", "tech"] for doc in results)
+
+
+def test_filter_no_matches_returns_empty():
+    emb = StubEmbeddings(dim=64)
+    store = TurboQuantVectorStore.from_texts(
+        ["x", "y"],
+        emb,
+        metadatas=[{"source": "a"}, {"source": "b"}],
+        bit_width=4,
+    )
+    results = store.similarity_search("x", k=10, filter={"source": "nonexistent"})
+    assert results == []
+
+
+def test_filter_with_score():
+    emb = StubEmbeddings(dim=64)
+    store = TurboQuantVectorStore.from_texts(
+        ["one", "two", "three"],
+        emb,
+        metadatas=[{"n": 1}, {"n": 2}, {"n": 3}],
+        bit_width=4,
+    )
+    results = store.similarity_search_with_score("one", k=10, filter={"n": 1})
+    assert len(results) == 1
+    doc, score = results[0]
+    assert doc.metadata["n"] == 1
+
+
+def test_filter_by_vector():
+    emb = StubEmbeddings(dim=64)
+    store = TurboQuantVectorStore.from_texts(
+        ["a", "b", "c"],
+        emb,
+        metadatas=[{"keep": True}, {"keep": False}, {"keep": True}],
+        bit_width=4,
+    )
+    qvec = emb.embed_query("a")
+    results = store.similarity_search_by_vector(qvec, k=10, filter={"keep": True})
+    assert len(results) == 2
+    assert all(doc.metadata["keep"] is True for doc in results)

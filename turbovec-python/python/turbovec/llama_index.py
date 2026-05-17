@@ -160,11 +160,15 @@ class TurboQuantVectorStore(BasePydanticVectorStore):
         if not qvec.flags["C_CONTIGUOUS"]:
             qvec = np.ascontiguousarray(qvec)
 
-        k = min(query.similarity_top_k, len(self._index))
-        if k == 0:
+        has_filters = query.filters is not None
+        fetch_k = query.similarity_top_k if not has_filters else min(
+            query.similarity_top_k * 10, len(self._index)
+        )
+        fetch_k = min(fetch_k, len(self._index))
+        if fetch_k == 0:
             return VectorStoreQueryResult(nodes=[], similarities=[], ids=[])
 
-        scores, handles = self._index.search(qvec, k)
+        scores, handles = self._index.search(qvec, fetch_k)
 
         result_nodes: list[TextNode] = []
         similarities: list[float] = []
@@ -172,6 +176,12 @@ class TurboQuantVectorStore(BasePydanticVectorStore):
         for score, handle in zip(scores[0], handles[0]):
             nid = self._u64_to_node_id[int(handle)]
             state = self._nodes[nid]
+
+            if has_filters and not _matches_metadata_filter(
+                state["metadata"], query.filters
+            ):
+                continue
+
             node = TextNode(
                 id_=nid,
                 text=state["text"],
@@ -184,6 +194,8 @@ class TurboQuantVectorStore(BasePydanticVectorStore):
             result_nodes.append(node)
             similarities.append(float(score))
             ids.append(nid)
+            if len(result_nodes) >= query.similarity_top_k:
+                break
 
         return VectorStoreQueryResult(nodes=result_nodes, similarities=similarities, ids=ids)
 
@@ -229,6 +241,27 @@ class TurboQuantVectorStore(BasePydanticVectorStore):
         store._u64_to_node_id = {h: nid for nid, h in state["node_id_to_u64"].items()}
         store._next_u64 = state["next_u64"]
         return store
+
+
+def _matches_metadata_filter(meta: dict[str, Any], filters: Any) -> bool:
+    """Check if node metadata matches the VectorStoreQuery filters.
+
+    Supports MetadataFilters from llama_index with exact match conditions.
+    """
+    if filters is None:
+        return True
+    # LlamaIndex MetadataFilters has a .filters list of MetadataFilter objects
+    if hasattr(filters, "filters"):
+        for f in filters.filters:
+            key = f.key
+            value = f.value
+            if isinstance(value, list):
+                if meta.get(key) not in value:
+                    return False
+            else:
+                if meta.get(key) != value:
+                    return False
+    return True
 
 
 __all__ = ["TurboQuantVectorStore"]

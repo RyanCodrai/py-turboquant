@@ -109,35 +109,46 @@ class TurboQuantVectorStore(VectorStore):
             self._docs[id_] = (text, dict(meta))
         return ids
 
-    def similarity_search(self, query: str, k: int = 4, **_: Any) -> list[Document]:
-        return [doc for doc, _score in self.similarity_search_with_score(query, k=k)]
+    def similarity_search(
+        self, query: str, k: int = 4, filter: dict[str, Any] | None = None, **_: Any
+    ) -> list[Document]:
+        return [doc for doc, _score in self.similarity_search_with_score(query, k=k, filter=filter)]
 
     def similarity_search_with_score(
-        self, query: str, k: int = 4, **_: Any
+        self, query: str, k: int = 4, filter: dict[str, Any] | None = None, **_: Any
     ) -> list[tuple[Document, float]]:
         qvec = np.asarray(self._embedding.embed_query(query), dtype=np.float32)
-        return self._search_vector(qvec, k)
+        return self._search_vector(qvec, k, filter=filter)
 
     def similarity_search_by_vector(
-        self, embedding: list[float], k: int = 4, **_: Any
+        self, embedding: list[float], k: int = 4, filter: dict[str, Any] | None = None, **_: Any
     ) -> list[Document]:
         qvec = np.asarray(embedding, dtype=np.float32)
-        return [doc for doc, _score in self._search_vector(qvec, k)]
+        return [doc for doc, _score in self._search_vector(qvec, k, filter=filter)]
 
-    def _search_vector(self, qvec: np.ndarray, k: int) -> list[tuple[Document, float]]:
+    def _search_vector(
+        self, qvec: np.ndarray, k: int, filter: dict[str, Any] | None = None
+    ) -> list[tuple[Document, float]]:
         if qvec.ndim == 1:
             qvec = qvec[None, :]
         if not qvec.flags["C_CONTIGUOUS"]:
             qvec = np.ascontiguousarray(qvec)
-        k = min(k, len(self._index))
-        if k == 0:
+        # Over-fetch when filtering so we still return ~k results after
+        # dropping non-matches.
+        fetch_k = k if filter is None else min(k * 10, len(self._index))
+        fetch_k = min(fetch_k, len(self._index))
+        if fetch_k == 0:
             return []
-        scores, handles = self._index.search(qvec, k)
+        scores, handles = self._index.search(qvec, fetch_k)
         results: list[tuple[Document, float]] = []
         for score, handle in zip(scores[0], handles[0]):
             sid = self._u64_to_str[int(handle)]
             text, meta = self._docs[sid]
+            if filter is not None and not _matches_filter(meta, filter):
+                continue
             results.append((Document(page_content=text, metadata=dict(meta)), float(score)))
+            if len(results) >= k:
+                break
         return results
 
     def delete(self, ids: list[str] | None = None, **_: Any) -> bool | None:
@@ -217,6 +228,18 @@ class TurboQuantVectorStore(VectorStore):
             str_to_u64=state["str_to_u64"],
             next_u64=state["next_u64"],
         )
+
+
+def _matches_filter(meta: dict[str, Any], filter: dict[str, Any]) -> bool:
+    """Check if document metadata matches all filter key-value pairs."""
+    for key, value in filter.items():
+        if isinstance(value, list):
+            if meta.get(key) not in value:
+                return False
+        else:
+            if meta.get(key) != value:
+                return False
+    return True
 
 
 __all__ = ["TurboQuantVectorStore"]
