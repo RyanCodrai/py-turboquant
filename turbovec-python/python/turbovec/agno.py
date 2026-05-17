@@ -1,0 +1,634 @@
+"""Agno VectorDb backed by turbovec's quantized index.
+
+Install with: ``pip install turbovec[agno]``.
+
+Implements Agno's ``VectorDb`` interface and matches the public surface
+of ``agno.vectordb.lancedb.LanceDb`` (the closest in-tree single-machine
+backend) so this can be swapped in wherever ``LanceDb`` is used.
+"""
+
+from __future__ import annotations
+
+import json
+from hashlib import md5
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Set, Union
+
+import numpy as np
+
+from ._turbovec import IdMapIndex
+
+try:
+    from agno.knowledge.document import Document
+    from agno.knowledge.embedder import Embedder
+    from agno.knowledge.reranker.base import Reranker
+    from agno.vectordb.base import VectorDb
+    from agno.vectordb.distance import Distance
+    from agno.vectordb.search import SearchType
+except ImportError as exc:
+    raise ImportError(
+        "agno is required to use turbovec.agno. "
+        "Install with: pip install turbovec[agno]"
+    ) from exc
+
+
+_INDEX_FILENAME = "index.tvim"
+_STORE_FILENAME = "docstore.json"
+# Bump when docstore.json shape changes; loader refuses unknown versions.
+_DOCSTORE_SCHEMA_VERSION = 1
+
+
+class TurboQuantVectorDb(VectorDb):
+    """Agno VectorDb backed by a :class:`IdMapIndex`.
+
+    Vectors are quantized to 2-4 bits per dimension. The public surface
+    mirrors ``agno.vectordb.lancedb.LanceDb`` so this is a drop-in
+    replacement wherever a single-machine LanceDb is used. Search-time
+    filtering is resolved to an allowlist *before* scoring (kernel-level)
+    rather than via post-filtering, so selective filters return up to
+    ``limit`` results from the filtered set instead of fewer.
+
+    Example::
+
+        from agno.knowledge.embedder.openai import OpenAIEmbedder
+        from turbovec.agno import TurboQuantVectorDb
+
+        vector_db = TurboQuantVectorDb(embedder=OpenAIEmbedder())
+        vector_db.create()
+        # ... use as a normal Agno VectorDb ...
+    """
+
+    def __init__(
+        self,
+        *,
+        id: Optional[str] = None,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        similarity_threshold: Optional[float] = None,
+        embedder: Optional[Embedder] = None,
+        bit_width: int = 4,
+        search_type: SearchType = SearchType.vector,
+        distance: Distance = Distance.cosine,
+        reranker: Optional[Reranker] = None,
+        path: Optional[str] = None,
+    ) -> None:
+        """
+        :param embedder: Required. Agno embedder used to encode documents
+            and queries. ``embedder.dimensions`` must be set — it's the
+            sole source of truth for the underlying quantized index's
+            dimensionality.
+        :param bit_width: Quantization width (2 or 4).
+        :param search_type: Only :class:`SearchType.vector` is supported;
+            other values raise :class:`ValueError`. (Keyword/hybrid search
+            would require an external BM25/lexical index.)
+        :param distance: Only :class:`Distance.cosine` is supported.
+            turbovec stores unit-normalized vectors, so the kernel's raw
+            score is cosine similarity directly.
+        :param reranker: Optional Agno reranker applied to the result set
+            after vector retrieval.
+        :param path: Optional directory for save/load persistence. When
+            given to the constructor, :meth:`create` loads existing data
+            from this path if present.
+        """
+        super().__init__(
+            id=id,
+            name=name,
+            description=description,
+            similarity_threshold=similarity_threshold,
+        )
+        if embedder is None:
+            raise ValueError(
+                "`embedder` is required; turbovec needs the embedder's "
+                "`dimensions` to size the underlying index."
+            )
+        if embedder.dimensions is None:
+            raise ValueError("Embedder.dimensions must be set.")
+        if bit_width not in (2, 4):
+            raise ValueError(f"bit_width must be 2 or 4, got {bit_width}")
+        if search_type != SearchType.vector:
+            raise ValueError(
+                f"TurboQuantVectorDb only supports search_type=SearchType.vector; "
+                f"got {search_type}. Use LanceDb / Chroma / etc. for keyword "
+                f"or hybrid search."
+            )
+        if distance != Distance.cosine:
+            raise ValueError(
+                f"TurboQuantVectorDb only supports distance=Distance.cosine; "
+                f"got {distance}. turbovec stores unit-normalized vectors."
+            )
+
+        self.embedder: Embedder = embedder
+        self.dimensions: int = embedder.dimensions
+        self.bit_width = bit_width
+        self.search_type = search_type
+        self.distance = distance
+        self.reranker = reranker
+        self.path: Optional[str] = path
+
+        # Eager IdMapIndex — embedder.dimensions is known.
+        self._index: IdMapIndex = IdMapIndex(self.dimensions, bit_width)
+        # str doc_id -> u64 handle
+        self._str_to_u64: Dict[str, int] = {}
+        # u64 handle -> stored payload (mirrors LanceDb's "payload" shape)
+        self._u64_to_doc: Dict[int, Dict[str, Any]] = {}
+        # u64 handle assignment counter
+        self._next_u64: int = 0
+        # Auxiliary indexes for O(1) protocol queries
+        self._content_hashes: Set[str] = set()
+        self._name_to_ids: Dict[str, Set[str]] = {}
+
+    # ---- handle allocation ------------------------------------------------
+
+    def _issue_handle(self) -> int:
+        self._next_u64 += 1
+        return self._next_u64
+
+    # ---- VectorDb protocol: lifecycle ------------------------------------
+
+    def create(self) -> None:
+        """Initialize the store. If ``path`` was given and the directory
+        contains a previous save, load it; otherwise the store is ready
+        as-is."""
+        if self.path is not None and Path(self.path).is_dir():
+            try:
+                self._load_from(Path(self.path))
+            except FileNotFoundError:
+                # Empty directory — nothing to load.
+                pass
+
+    async def async_create(self) -> None:
+        self.create()
+
+    def drop(self) -> None:
+        """Drop all data and reset to an empty store."""
+        self._index = IdMapIndex(self.dimensions, self.bit_width)
+        self._str_to_u64.clear()
+        self._u64_to_doc.clear()
+        self._next_u64 = 0
+        self._content_hashes.clear()
+        self._name_to_ids.clear()
+
+    async def async_drop(self) -> None:
+        self.drop()
+
+    def exists(self) -> bool:
+        return len(self._index) > 0
+
+    async def async_exists(self) -> bool:
+        return self.exists()
+
+    def delete(self) -> bool:
+        self.drop()
+        return True
+
+    # ---- VectorDb protocol: existence checks ------------------------------
+
+    def name_exists(self, name: str) -> bool:
+        return name in self._name_to_ids
+
+    async def async_name_exists(self, name: str) -> bool:
+        return self.name_exists(name)
+
+    def id_exists(self, id: str) -> bool:
+        return id in self._str_to_u64
+
+    def content_hash_exists(self, content_hash: str) -> bool:
+        return content_hash in self._content_hashes
+
+    # ---- VectorDb protocol: insert / upsert -------------------------------
+
+    @staticmethod
+    def _derive_doc_id(doc: Document, content_hash: str, cleaned_content: str) -> str:
+        """Match LanceDb's id-derivation contract so the same doc with the
+        same content_hash produces the same stable doc_id across stores."""
+        base_id = doc.id or md5(cleaned_content.encode()).hexdigest()
+        return md5(f"{base_id}_{content_hash}".encode()).hexdigest()
+
+    def _embed_missing(self, documents: List[Document]) -> None:
+        """Populate embeddings on any documents that don't have one. Uses
+        the embedder's batch path when available."""
+        to_embed = [
+            doc
+            for doc in documents
+            if doc.embedding is None
+            or (isinstance(doc.embedding, list) and len(doc.embedding) == 0)
+        ]
+        if not to_embed:
+            return
+        if (
+            getattr(self.embedder, "enable_batch", False)
+            and hasattr(self.embedder, "get_embeddings_batch_and_usage")
+        ):
+            contents = [doc.content for doc in to_embed]
+            embeddings, usages = self.embedder.get_embeddings_batch_and_usage(contents)
+            for j, doc in enumerate(to_embed):
+                if j < len(embeddings):
+                    doc.embedding = embeddings[j]
+                    doc.usage = usages[j] if j < len(usages) else None
+        else:
+            for doc in to_embed:
+                doc.embed(embedder=self.embedder)
+
+    async def _embed_missing_async(self, documents: List[Document]) -> None:
+        to_embed = [
+            doc
+            for doc in documents
+            if doc.embedding is None
+            or (isinstance(doc.embedding, list) and len(doc.embedding) == 0)
+        ]
+        if not to_embed:
+            return
+        if (
+            getattr(self.embedder, "enable_batch", False)
+            and hasattr(self.embedder, "async_get_embeddings_batch_and_usage")
+        ):
+            contents = [doc.content for doc in to_embed]
+            embeddings, usages = await self.embedder.async_get_embeddings_batch_and_usage(
+                contents
+            )
+            for j, doc in enumerate(to_embed):
+                if j < len(embeddings):
+                    doc.embedding = embeddings[j]
+                    doc.usage = usages[j] if j < len(usages) else None
+        else:
+            # Embedder has no async batch path — fall back to sync.
+            self._embed_missing(to_embed)
+
+    def insert(
+        self,
+        content_hash: str,
+        documents: List[Document],
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not documents:
+            return
+
+        # Merge `filters` into each document's metadata (matches LanceDb).
+        if filters:
+            for doc in documents:
+                meta = dict(doc.meta_data) if doc.meta_data else {}
+                meta.update(filters)
+                doc.meta_data = meta
+
+        self._embed_missing(documents)
+
+        # Raise on any document that still lacks an embedding rather than
+        # silently dropping — silent drops mask data-pipeline bugs.
+        missing = [doc for doc in documents if not doc.embedding]
+        if missing:
+            ids = [doc.id or "<no id>" for doc in missing]
+            raise ValueError(
+                f"failed to embed {len(missing)} document(s): {ids}"
+            )
+
+        # Batch the entire `documents` list into a single add_with_ids call.
+        # Per-document inserts would invalidate the SIMD-blocked cache
+        # between every doc.
+        vectors = np.asarray([doc.embedding for doc in documents], dtype=np.float32)
+        if vectors.ndim != 2:
+            raise ValueError(
+                f"expected 2D embedding batch, got {vectors.ndim}D"
+            )
+        if vectors.shape[1] != self.dimensions:
+            raise ValueError(
+                f"embedding dim {vectors.shape[1]} does not match "
+                f"index dim {self.dimensions}"
+            )
+        if not vectors.flags["C_CONTIGUOUS"]:
+            vectors = np.ascontiguousarray(vectors)
+
+        handles = np.array(
+            [self._issue_handle() for _ in documents], dtype=np.uint64
+        )
+        self._index.add_with_ids(vectors, handles)
+
+        for doc, handle in zip(documents, handles):
+            cleaned = doc.content.replace("\x00", "�") if doc.content else ""
+            doc_id = self._derive_doc_id(doc, content_hash, cleaned)
+            h = int(handle)
+            self._str_to_u64[doc_id] = h
+            self._u64_to_doc[h] = {
+                "id": doc_id,
+                "name": doc.name,
+                "content": cleaned,
+                "meta_data": dict(doc.meta_data) if doc.meta_data else {},
+                "usage": doc.usage,
+                "content_id": doc.content_id,
+                "content_hash": content_hash,
+            }
+            self._content_hashes.add(content_hash)
+            if doc.name:
+                self._name_to_ids.setdefault(doc.name, set()).add(doc_id)
+
+    async def async_insert(
+        self,
+        content_hash: str,
+        documents: List[Document],
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not documents:
+            return
+        await self._embed_missing_async(documents)
+        # Now every doc should have an embedding; insert delegates to sync.
+        self.insert(content_hash, documents, filters)
+
+    def upsert_available(self) -> bool:
+        return True
+
+    def upsert(
+        self,
+        content_hash: str,
+        documents: List[Document],
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        # Compute the deterministic doc_id for each input and remove any
+        # existing entry with the same id, then delegate to insert.
+        for doc in documents:
+            cleaned = doc.content.replace("\x00", "�") if doc.content else ""
+            doc_id = self._derive_doc_id(doc, content_hash, cleaned)
+            if doc_id in self._str_to_u64:
+                self.delete_by_id(doc_id)
+        self.insert(content_hash, documents, filters)
+
+    async def async_upsert(
+        self,
+        content_hash: str,
+        documents: List[Document],
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        for doc in documents:
+            cleaned = doc.content.replace("\x00", "�") if doc.content else ""
+            doc_id = self._derive_doc_id(doc, content_hash, cleaned)
+            if doc_id in self._str_to_u64:
+                self.delete_by_id(doc_id)
+        await self.async_insert(content_hash, documents, filters)
+
+    # ---- VectorDb protocol: search ----------------------------------------
+
+    def _resolve_filter_to_handles(
+        self, filters: Optional[Union[Dict[str, Any], List[Any]]]
+    ) -> Optional[List[int]]:
+        """Convert a dict filter into the list of internal u64 handles
+        whose document's ``meta_data`` matches every key/value pair (AND).
+        Returns ``None`` when no filter was supplied — caller should run
+        an unfiltered search. Returns ``[]`` to mean "no matches".
+
+        Matches LanceDb's dict-filter semantics (exact equality, AND of
+        keys). ``FilterExpr``-style list filters are not yet supported
+        in LanceDb itself, so we silently ignore them here too with a
+        debug log.
+        """
+        if filters is None:
+            return None
+        if isinstance(filters, list):
+            # LanceDb logs a warning and ignores. Mirror that — the
+            # alternative is to error and break callers that pass an
+            # accidental list.
+            return None
+        if not isinstance(filters, dict) or not filters:
+            return None
+        items = list(filters.items())
+        return [
+            handle
+            for handle, data in self._u64_to_doc.items()
+            if all((data.get("meta_data") or {}).get(k) == v for k, v in items)
+        ]
+
+    def _scaled_similarity(self, raw: float) -> float:
+        """Map cosine similarity in ``[-1, 1]`` to ``[0, 1]``. Clamped to
+        absorb the small overshoot caused by quantization noise."""
+        return max(0.0, min(1.0, (raw + 1.0) / 2.0))
+
+    def _build_results(
+        self, scores: np.ndarray, handles: np.ndarray
+    ) -> List[Document]:
+        results: List[Document] = []
+        threshold = self.similarity_threshold
+        for raw_score, handle in zip(scores[0], handles[0]):
+            doc_data = self._u64_to_doc.get(int(handle))
+            if doc_data is None:
+                continue
+            similarity = self._scaled_similarity(float(raw_score))
+            if threshold is not None and similarity < threshold:
+                continue
+            results.append(
+                Document(
+                    id=doc_data["id"],
+                    name=doc_data.get("name"),
+                    content=doc_data.get("content", ""),
+                    meta_data=dict(doc_data.get("meta_data") or {}),
+                    usage=doc_data.get("usage"),
+                    content_id=doc_data.get("content_id"),
+                )
+            )
+        return results
+
+    def search(
+        self,
+        query: str,
+        limit: int = 5,
+        filters: Optional[Union[Dict[str, Any], List[Any]]] = None,
+    ) -> List[Document]:
+        if len(self._index) == 0:
+            return []
+
+        query_embedding = self.embedder.get_embedding(query)
+        if query_embedding is None:
+            return []
+        qvec = np.asarray(query_embedding, dtype=np.float32)
+        if qvec.ndim == 1:
+            qvec = qvec[None, :]
+        if not qvec.flags["C_CONTIGUOUS"]:
+            qvec = np.ascontiguousarray(qvec)
+
+        allowed_handles = self._resolve_filter_to_handles(filters)
+        if allowed_handles is None:
+            # Unfiltered.
+            k = min(limit, len(self._index))
+            scores, handles = self._index.search(qvec, k)
+        else:
+            if not allowed_handles:
+                return []
+            allowlist = np.asarray(allowed_handles, dtype=np.uint64)
+            scores, handles = self._index.search(qvec, limit, allowlist=allowlist)
+
+        results = self._build_results(scores, handles)
+        if self.reranker is not None and results:
+            results = self.reranker.rerank(query=query, documents=results)
+        return results
+
+    async def async_search(
+        self,
+        query: str,
+        limit: int = 5,
+        filters: Optional[Union[Dict[str, Any], List[Any]]] = None,
+    ) -> List[Document]:
+        if len(self._index) == 0:
+            return []
+
+        if hasattr(self.embedder, "async_get_embedding"):
+            query_embedding = await self.embedder.async_get_embedding(query)
+        else:
+            query_embedding = self.embedder.get_embedding(query)
+        if query_embedding is None:
+            return []
+        qvec = np.asarray(query_embedding, dtype=np.float32)
+        if qvec.ndim == 1:
+            qvec = qvec[None, :]
+        if not qvec.flags["C_CONTIGUOUS"]:
+            qvec = np.ascontiguousarray(qvec)
+
+        allowed_handles = self._resolve_filter_to_handles(filters)
+        if allowed_handles is None:
+            k = min(limit, len(self._index))
+            scores, handles = self._index.search(qvec, k)
+        else:
+            if not allowed_handles:
+                return []
+            allowlist = np.asarray(allowed_handles, dtype=np.uint64)
+            scores, handles = self._index.search(qvec, limit, allowlist=allowlist)
+
+        results = self._build_results(scores, handles)
+        if self.reranker is not None and results:
+            results = self.reranker.rerank(query=query, documents=results)
+        return results
+
+    def get_supported_search_types(self) -> List[str]:
+        # Only vector. Keyword and hybrid would require an external BM25
+        # / lexical index that turbovec doesn't ship.
+        return [SearchType.vector.value]
+
+    # ---- VectorDb protocol: delete ----------------------------------------
+
+    def delete_by_id(self, id: str) -> bool:
+        handle = self._str_to_u64.pop(id, None)
+        if handle is None:
+            return False
+        doc_data = self._u64_to_doc.pop(handle, None)
+        if doc_data is not None:
+            name = doc_data.get("name")
+            if name and name in self._name_to_ids:
+                self._name_to_ids[name].discard(id)
+                if not self._name_to_ids[name]:
+                    del self._name_to_ids[name]
+        self._index.remove(handle)
+        # Lazily drop content_hash from the set if no surviving doc has it.
+        if doc_data is not None:
+            ch = doc_data.get("content_hash")
+            if ch and not any(
+                d.get("content_hash") == ch for d in self._u64_to_doc.values()
+            ):
+                self._content_hashes.discard(ch)
+        return True
+
+    def delete_by_name(self, name: str) -> bool:
+        ids = list(self._name_to_ids.get(name, set()))
+        for doc_id in ids:
+            self.delete_by_id(doc_id)
+        return bool(ids)
+
+    def delete_by_metadata(self, metadata: Dict[str, Any]) -> bool:
+        items = list(metadata.items())
+        to_delete = [
+            data["id"]
+            for data in self._u64_to_doc.values()
+            if all((data.get("meta_data") or {}).get(k) == v for k, v in items)
+        ]
+        for doc_id in to_delete:
+            self.delete_by_id(doc_id)
+        return bool(to_delete)
+
+    def delete_by_content_id(self, content_id: str) -> bool:
+        to_delete = [
+            data["id"]
+            for data in self._u64_to_doc.values()
+            if data.get("content_id") == content_id
+        ]
+        for doc_id in to_delete:
+            self.delete_by_id(doc_id)
+        return bool(to_delete)
+
+    def update_metadata(self, content_id: str, metadata: Dict[str, Any]) -> None:
+        """Merge ``metadata`` into ``meta_data`` of every document whose
+        ``content_id`` matches. Overrides the base-class no-op log."""
+        for data in self._u64_to_doc.values():
+            if data.get("content_id") == content_id:
+                meta = dict(data.get("meta_data") or {})
+                meta.update(metadata)
+                data["meta_data"] = meta
+
+    # ---- Persistence (JSON side-car) --------------------------------------
+
+    def save(self, folder_path: Optional[str] = None) -> None:
+        """Persist the quantized index plus a JSON side-car to disk. Pass
+        ``folder_path`` to override the constructor's ``path=``.
+
+        Writes two files under ``folder_path``:
+          - ``index.tvim`` — the :class:`IdMapIndex` payload.
+          - ``docstore.json`` — JSON-encoded document text, metadata, and
+            id maps. Side-car carries a ``schema_version`` field; loaders
+            reject unknown versions rather than silently misinterpreting
+            bytes.
+        """
+        path = folder_path if folder_path is not None else self.path
+        if path is None:
+            raise ValueError(
+                "No path to save to. Pass `folder_path=` here or set "
+                "`path=` on the constructor."
+            )
+        folder = Path(path)
+        folder.mkdir(parents=True, exist_ok=True)
+        self._index.write(str(folder / _INDEX_FILENAME))
+        payload = {
+            "schema_version": _DOCSTORE_SCHEMA_VERSION,
+            # Round-trip int handles via list-of-pairs (JSON keys must be
+            # strings, but our handles are ints).
+            "u64_to_doc": [[h, d] for h, d in self._u64_to_doc.items()],
+            "next_u64": self._next_u64,
+            "bit_width": self.bit_width,
+            "dimensions": self.dimensions,
+        }
+        with open(folder / _STORE_FILENAME, "w") as f:
+            json.dump(payload, f)
+
+    def _load_from(self, folder: Path) -> None:
+        side_car = folder / _STORE_FILENAME
+        index_file = folder / _INDEX_FILENAME
+        if not side_car.exists() or not index_file.exists():
+            raise FileNotFoundError(
+                f"missing one of {_STORE_FILENAME}/{_INDEX_FILENAME} under {folder}"
+            )
+        with open(side_car) as f:
+            state = json.load(f)
+        version = state.get("schema_version", 0)
+        if version != _DOCSTORE_SCHEMA_VERSION:
+            raise ValueError(
+                f"{_STORE_FILENAME} has schema_version {version}; this "
+                f"turbovec expects {_DOCSTORE_SCHEMA_VERSION}"
+            )
+        if state.get("dimensions") != self.dimensions:
+            raise ValueError(
+                f"persisted dimensions={state.get('dimensions')} does not "
+                f"match this store's embedder dimensions={self.dimensions}"
+            )
+
+        self._index = IdMapIndex.load(str(index_file))
+        self._u64_to_doc = {int(h): d for h, d in state["u64_to_doc"]}
+        self._next_u64 = int(state["next_u64"])
+
+        # Rebuild reverse indexes from the loaded payload.
+        self._str_to_u64 = {
+            data["id"]: handle for handle, data in self._u64_to_doc.items()
+        }
+        self._content_hashes = set()
+        self._name_to_ids = {}
+        for data in self._u64_to_doc.values():
+            ch = data.get("content_hash")
+            if ch:
+                self._content_hashes.add(ch)
+            name = data.get("name")
+            if name:
+                self._name_to_ids.setdefault(name, set()).add(data["id"])
+
+
+__all__ = ["TurboQuantVectorDb"]

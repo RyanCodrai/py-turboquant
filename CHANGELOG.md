@@ -11,7 +11,36 @@ appears under each surface it touches.
 
 ## [Unreleased]
 
-(Nothing in flight — `next` lines below describe published versions.)
+### turbovec — Python package
+
+#### Added
+
+- **Agno integration** (`turbovec.agno`). New `TurboQuantVectorDb` class
+  implementing Agno's `VectorDb` interface, structurally aligned with
+  `agno.vectordb.lancedb.LanceDb` (the closest in-tree single-machine
+  backend). Drop-in for callers that use `LanceDb` as their Agno
+  knowledge backend.
+  - Dim is sourced from `embedder.dimensions` (matches `LanceDb`); no
+    baked-in default.
+  - Filtered search uses the kernel-level `allowlist=` path: filters
+    resolve to a handle allowlist before scoring, so selective filters
+    return up to `limit` results from the filtered set instead of
+    fewer-than-`limit` from a post-filter.
+  - JSON side-car persistence (no pickle, no
+    `allow_dangerous_deserialization` flag).
+  - Constructor restricts `search_type=vector` and `distance=cosine`
+    — turbovec doesn't ship a BM25/lexical index and stores
+    unit-normalized vectors only. Non-vector / non-cosine constructions
+    raise `ValueError` rather than silently misbehaving.
+  - Honours `similarity_threshold` (cosine → relevance clamped to
+    `[0, 1]` via `(s + 1) / 2`), `reranker` (optional rerank pass after
+    vector retrieval), `content_id` / `content_hash` payload fields.
+  - Full async surface: `async_*` variants for create/insert/upsert/
+    search/drop/exists/name_exists, using the embedder's async batch
+    paths when available.
+  - Install: `pip install turbovec[agno]`.
+
+## turbovec 0.3.0 (Rust crate) — 2026-05-17
 
 ## turbovec 0.3.0 (Rust crate) — 2026-05-17
 
