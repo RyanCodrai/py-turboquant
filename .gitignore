@@ -4,6 +4,7 @@ __pycache__/
 *.pyc
 *.bak
 *.so
+*.dSYM/
 *.tq
 *.npy
 codebooks.npz

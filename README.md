@@ -82,9 +82,11 @@ See [`docs/api.md`](docs/api.md) for the full reference.
 
 ### Framework integrations
 
-- [LangChain](docs/integrations/langchain.md) — `pip install turbovec[langchain]`
-- [LlamaIndex](docs/integrations/llama_index.md) — `pip install turbovec[llama-index]`
-- [Haystack](docs/integrations/haystack.md) — `pip install turbovec[haystack]`
+Drop-in replacements for the in-tree reference vector / document stores in each framework. Same public surface, same persistence semantics, same retriever and pipeline wiring — swap the import and keep your pipeline.
+
+- [LangChain](docs/integrations/langchain.md) — `pip install turbovec[langchain]` · replaces `langchain_core.vectorstores.InMemoryVectorStore`
+- [LlamaIndex](docs/integrations/llama_index.md) — `pip install turbovec[llama-index]` · replaces `llama_index.core.vector_stores.SimpleVectorStore`
+- [Haystack](docs/integrations/haystack.md) — `pip install turbovec[haystack]` · replaces `haystack.document_stores.in_memory.InMemoryDocumentStore`
 
 ## Rust
 
