@@ -63,6 +63,7 @@ See [`docs/api.md`](docs/api.md) for the full reference.
 - [LangChain](docs/integrations/langchain.md) — `pip install turbovec[langchain]`
 - [LlamaIndex](docs/integrations/llama_index.md) — `pip install turbovec[llama-index]`
 - [Haystack](docs/integrations/haystack.md) — `pip install turbovec[haystack]`
+- [Agno](docs/integrations/agno.md) — `pip install turbovec[agno]`
 
 ## Rust
 
