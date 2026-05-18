@@ -649,7 +649,13 @@ class TurboQuantDocumentStore:
             if self.embedding_similarity_function == "dot_product":
                 score = 1.0 / (1.0 + math.exp(-score / 100.0))
             elif self.embedding_similarity_function == "cosine":
-                score = (score + 1.0) / 2.0
+                # Clamp to the exact cosine range before rescaling. Cauchy–Schwarz
+                # bounds the true cosine in [-1, 1], but the LUT scoring kernel's
+                # float-precision noise can land slightly outside that range on
+                # near-identical document/query pairs (e.g. a self-query under the
+                # length-renormalized estimator produces ~1.00016). Clamping
+                # preserves the [0, 1] contract for ``scale_score=True`` consumers.
+                score = (max(-1.0, min(1.0, score)) + 1.0) / 2.0
         return Document(
             id=data["id"],
             content=data["content"],
