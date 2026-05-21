@@ -465,3 +465,5 @@ impl TurboQuantIndex {
         self.bit_width
     }
 }
+pub mod hybrid;
+pub use crate::hybrid::{HybridIndex, add_batch_hybrid};
