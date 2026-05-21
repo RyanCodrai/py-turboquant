@@ -170,3 +170,11 @@ def test_add_with_mismatched_dim_raises_value_error():
     idx = TurboQuantIndex(dim=128, bit_width=4)
     with pytest.raises(ValueError, match="dim mismatch"):
         idx.add(unit_vectors(3, 256))
+
+
+def test_search_on_empty_eager_index_returns_zero_effective_k():
+    idx = TurboQuantIndex(dim=128, bit_width=4)
+    q = unit_vectors(1, 128)
+    scores, indices = idx.search(q, k=3)
+    assert scores.shape == (1, 0)
+    assert indices.shape == (1, 0)
