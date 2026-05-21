@@ -26,12 +26,18 @@ def test_new_reports_dim_and_bit_width():
     assert len(idx) == 0
 
 
-@pytest.mark.parametrize("bit_width", [2, 4])
+@pytest.mark.parametrize("bit_width", [2, 3, 4])
 def test_bit_width_options(bit_width):
     idx = TurboQuantIndex(dim=128, bit_width=bit_width)
     assert idx.bit_width == bit_width
     idx.add(unit_vectors(20, 128))
     assert len(idx) == 20
+
+
+@pytest.mark.parametrize("bit_width", [0, 1, 5, 8])
+def test_bit_width_rejects_invalid(bit_width):
+    with pytest.raises((ValueError, RuntimeError)):
+        TurboQuantIndex(dim=128, bit_width=bit_width)
 
 
 def test_add_updates_length():
