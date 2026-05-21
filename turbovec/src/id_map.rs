@@ -17,7 +17,7 @@
 //!
 //! let mut index = IdMapIndex::new(1536, 4);
 //! let vectors: Vec<f32> = vec![0.0; 1536 * 3];
-//! index.add_with_ids(&vectors, &[1001, 1002, 1003]);
+//! index.add_with_ids(&vectors, &[1001, 1002, 1003]).unwrap();
 //!
 //! let queries: Vec<f32> = vec![0.0; 1536];
 //! let (scores, ids) = index.search(&queries, 3);
@@ -39,7 +39,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::io;
-use crate::TurboQuantIndex;
+use crate::{AddError, TurboQuantIndex};
 
 /// ID-addressed wrapper around [`TurboQuantIndex`].
 pub struct IdMapIndex {
@@ -77,15 +77,16 @@ impl IdMapIndex {
     /// Requires the inner index's dim to already be set (eager constructor
     /// or a previous lazy add).
     ///
-    /// Panics if `ids.len() != n`, if any id is already present in the
-    /// index, if `ids` contains duplicates within this call, or if the
-    /// inner index is still in lazy/uninitialized state.
-    pub fn add_with_ids(&mut self, vectors: &[f32], ids: &[u64]) {
+    /// Returns the same errors as
+    /// [`Self::add_with_ids_2d`]. Panics only if the inner index is still
+    /// in lazy/uninitialized state — that signals API misuse (use
+    /// `add_with_ids_2d` on a lazy index), not bad input.
+    pub fn add_with_ids(&mut self, vectors: &[f32], ids: &[u64]) -> Result<(), AddError> {
         let dim = self.inner.dim_opt().expect(
             "IdMapIndex dim is not set; use add_with_ids_2d(vectors, dim, ids) \
              on the first add or construct with IdMapIndex::new(dim, bit_width)",
         );
-        self.add_with_ids_2d(vectors, dim, ids);
+        self.add_with_ids_2d(vectors, dim, ids)
     }
 
     /// Add `vectors` of dimensionality `dim` with the given external ids.
@@ -95,36 +96,54 @@ impl IdMapIndex {
     /// This is the form bindings with shape information (e.g. the Python
     /// binding receiving a 2D ndarray) should use, since a flat
     /// `&[f32]` alone is ambiguous about shape.
-    pub fn add_with_ids_2d(&mut self, vectors: &[f32], dim: usize, ids: &[u64]) {
+    ///
+    /// Returns
+    /// [`AddError::VectorBufferNotMultipleOfDim`](crate::AddError::VectorBufferNotMultipleOfDim),
+    /// [`AddError::IdsCountMismatch`](crate::AddError::IdsCountMismatch),
+    /// [`AddError::IdAlreadyPresent`](crate::AddError::IdAlreadyPresent),
+    /// or any error returned by
+    /// [`TurboQuantIndex::add_2d`](crate::TurboQuantIndex::add_2d).
+    pub fn add_with_ids_2d(
+        &mut self,
+        vectors: &[f32],
+        dim: usize,
+        ids: &[u64],
+    ) -> Result<(), AddError> {
+        if dim == 0 || vectors.len() % dim != 0 {
+            return Err(AddError::VectorBufferNotMultipleOfDim {
+                vectors_len: vectors.len(),
+                dim,
+            });
+        }
         let n = vectors.len() / dim;
-        assert_eq!(
-            vectors.len(),
-            n * dim,
-            "vector buffer length {} not a multiple of dim {}",
-            vectors.len(),
-            dim,
-        );
-        assert_eq!(
-            ids.len(),
-            n,
-            "expected {n} ids, got {}",
-            ids.len(),
-        );
+        if ids.len() != n {
+            return Err(AddError::IdsCountMismatch {
+                expected: n,
+                got: ids.len(),
+            });
+        }
 
-        // Reserve first so that a partial failure is impossible.
+        // Validate all ids up-front so a partial failure is impossible.
+        // Reject both ids already in the index and duplicates within
+        // this call.
+        let mut seen_this_call: std::collections::HashSet<u64> =
+            std::collections::HashSet::with_capacity(n);
+        for &id in ids {
+            if self.id_to_slot.contains_key(&id) || !seen_this_call.insert(id) {
+                return Err(AddError::IdAlreadyPresent(id));
+            }
+        }
+
         self.id_to_slot.reserve(n);
         self.slot_to_id.reserve(n);
 
         let base_slot = self.inner.len();
         for (i, &id) in ids.iter().enumerate() {
-            let slot = base_slot + i;
-            if self.id_to_slot.insert(id, slot).is_some() {
-                panic!("id {id} already present in index");
-            }
+            self.id_to_slot.insert(id, base_slot + i);
         }
         self.slot_to_id.extend_from_slice(ids);
 
-        self.inner.add_2d(vectors, dim);
+        self.inner.add_2d(vectors, dim)
     }
 
     /// Remove the vector with the given external id.

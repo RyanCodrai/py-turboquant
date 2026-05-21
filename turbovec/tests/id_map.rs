@@ -1,7 +1,7 @@
 //! Correctness tests for `IdMapIndex` — the stable-id wrapper.
 //!
 //! Invariants exercised:
-//!   - `add_with_ids` panics on bad input (length mismatch, duplicate id).
+//!   - `add_with_ids` returns `Err` on bad input (length mismatch, duplicate id).
 //!   - `remove` returns true/false and keeps `len` consistent.
 //!   - After `remove`, search doesn't return the removed id, and every
 //!     remaining id still self-queries to itself.
@@ -57,7 +57,7 @@ fn add_with_ids_updates_len_and_contains() {
     let dim = 128;
     let data = gaussian_normalized(5, dim, 0xA11D_0000);
     let mut idx = IdMapIndex::new(dim, 4);
-    idx.add_with_ids(&data, &[100, 200, 300, 400, 500]);
+    idx.add_with_ids(&data, &[100, 200, 300, 400, 500]).unwrap();
 
     assert_eq!(idx.len(), 5);
     assert!(idx.contains(300));
@@ -70,7 +70,7 @@ fn search_returns_ids_not_slots() {
     let data = gaussian_normalized(10, dim, 0xA11D_0001);
     let mut idx = IdMapIndex::new(dim, 4);
     let ids: Vec<u64> = (1_000_000..1_000_010).collect();
-    idx.add_with_ids(&data, &ids);
+    idx.add_with_ids(&data, &ids).unwrap();
 
     // Self-query each vector: expect the matching external id as top-1.
     for (i, &expected_id) in ids.iter().enumerate() {
@@ -85,7 +85,7 @@ fn remove_returns_false_for_missing_id() {
     let dim = 128;
     let data = gaussian_normalized(3, dim, 0xA11D_0002);
     let mut idx = IdMapIndex::new(dim, 4);
-    idx.add_with_ids(&data, &[1, 2, 3]);
+    idx.add_with_ids(&data, &[1, 2, 3]).unwrap();
 
     assert!(!idx.remove(999));
     assert_eq!(idx.len(), 3);
@@ -97,7 +97,7 @@ fn remove_existing_id_shrinks_and_hides_it() {
     let data = gaussian_normalized(10, dim, 0xA11D_0003);
     let mut idx = IdMapIndex::new(dim, 4);
     let ids: Vec<u64> = (0..10).map(|i| i as u64 * 7 + 11).collect();
-    idx.add_with_ids(&data, &ids);
+    idx.add_with_ids(&data, &ids).unwrap();
 
     // Remove the third vector (id = 25, at slot 2).
     let target_id = ids[2];
@@ -117,7 +117,7 @@ fn remaining_ids_still_self_query_after_mixed_removes() {
     let data = gaussian_normalized(20, dim, 0xA11D_0004);
     let mut idx = IdMapIndex::new(dim, 4);
     let ids: Vec<u64> = (0..20).map(|i| i as u64 * 100 + 5).collect();
-    idx.add_with_ids(&data, &ids);
+    idx.add_with_ids(&data, &ids).unwrap();
 
     // Remove a few ids in different orders — some will trigger
     // swap-and-pop, some will be the last vector (no swap).
@@ -149,37 +149,45 @@ fn remove_then_re_add_same_id_is_allowed() {
     let dim = 128;
     let data = gaussian_normalized(5, dim, 0xA11D_0005);
     let mut idx = IdMapIndex::new(dim, 4);
-    idx.add_with_ids(&data, &[1, 2, 3, 4, 5]);
+    idx.add_with_ids(&data, &[1, 2, 3, 4, 5]).unwrap();
 
     assert!(idx.remove(3));
     assert!(!idx.contains(3));
 
     // Re-add a new vector with id 3.
     let new_vec = gaussian_normalized(1, dim, 0xA11D_BEEF);
-    idx.add_with_ids(&new_vec, &[3]);
+    idx.add_with_ids(&new_vec, &[3]).unwrap();
     assert!(idx.contains(3));
     assert_eq!(idx.len(), 5);
 }
 
 #[test]
-#[should_panic(expected = "already present")]
 fn add_with_ids_rejects_duplicate_id() {
     let dim = 128;
     let data = gaussian_normalized(5, dim, 0xA11D_0006);
     let mut idx = IdMapIndex::new(dim, 4);
-    idx.add_with_ids(&data[..2 * dim], &[1, 2]);
-    // Same id "2" already present -> panic.
-    idx.add_with_ids(&data[2 * dim..3 * dim], &[2]);
+    idx.add_with_ids(&data[..2 * dim], &[1, 2]).unwrap();
+    // Same id "2" already present.
+    let err = idx
+        .add_with_ids(&data[2 * dim..3 * dim], &[2])
+        .unwrap_err();
+    assert_eq!(err, turbovec::AddError::IdAlreadyPresent(2));
 }
 
 #[test]
-#[should_panic(expected = "expected")]
 fn add_with_ids_rejects_length_mismatch() {
     let dim = 128;
     let data = gaussian_normalized(5, dim, 0xA11D_0007);
     let mut idx = IdMapIndex::new(dim, 4);
-    // 5 vectors, only 3 ids -> panic.
-    idx.add_with_ids(&data, &[1, 2, 3]);
+    // 5 vectors, only 3 ids.
+    let err = idx.add_with_ids(&data, &[1, 2, 3]).unwrap_err();
+    assert_eq!(
+        err,
+        turbovec::AddError::IdsCountMismatch {
+            expected: 5,
+            got: 3,
+        },
+    );
 }
 
 #[test]
@@ -189,7 +197,7 @@ fn write_and_load_round_trips() {
     let ids: Vec<u64> = (2000..2010).collect();
 
     let mut idx = IdMapIndex::new(dim, 4);
-    idx.add_with_ids(&data, &ids);
+    idx.add_with_ids(&data, &ids).unwrap();
 
     // Delete a few to exercise non-identity slot_to_id mapping.
     idx.remove(2003);
@@ -229,7 +237,7 @@ fn load_rejects_wrong_magic() {
     let dim = 64;
     let data = gaussian_normalized(2, dim, 0xA11D_0101);
     let mut inner = IdMapIndex::new(dim, 4);
-    inner.add_with_ids(&data, &[1, 2]);
+    inner.add_with_ids(&data, &[1, 2]).unwrap();
     // Use the inner TurboQuantIndex's write to produce a .tv file.
     // We can't do that directly since inner is private; simulate with
     // arbitrary bytes of the right shape.

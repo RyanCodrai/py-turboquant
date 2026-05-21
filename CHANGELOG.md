@@ -11,6 +11,35 @@ appears under each surface it touches.
 
 ## [Unreleased]
 
+### turbovec — Rust crate
+
+#### Changed
+
+- **BREAKING:** `TurboQuantIndex::add_2d`, `IdMapIndex::add_with_ids_2d`,
+  and `IdMapIndex::add_with_ids` now return `Result<(), AddError>`
+  instead of panicking on invalid input. The new `turbovec::AddError`
+  enum covers dim mismatch, `dim % 8 != 0` on lazy-commit, vector
+  buffer length not a multiple of `dim`, ids/vectors count mismatch,
+  and duplicate ids. The low-level `TurboQuantIndex::add(&[f32])` and
+  constructor asserts are unchanged — they still panic, since those
+  signal contract violations rather than user-input errors.
+
+  Migration: append `?` (or `.unwrap()` in tests/binaries) to existing
+  calls. Match on `AddError` if you need to recover from specific
+  failure modes.
+
+### turbovec — Python package
+
+#### Changed
+
+- **Dim mismatch on `add` / `add_with_ids` now raises `ValueError`**
+  instead of surfacing a `pyo3_runtime.PanicException` with a Rust
+  backtrace. The previous `PanicException` subclassed `BaseException`
+  and so was not caught by `except Exception:` — user code can now
+  recover from a wrong-shape batch as a normal usage error. The same
+  applies to duplicate ids and length mismatches on
+  `IdMapIndex.add_with_ids`.
+
 ## turbovec 0.5.1 (Python package) + turbovec 0.4.1 (Rust crate) — 2026-05-18
 
 ### turbovec — Rust crate (current: 0.4.0 → next: 0.4.1)

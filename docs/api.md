@@ -41,7 +41,7 @@ Before the first add, `idx.dim` is `None`, `len(idx)` is `0`, and `search()` ret
 | Method | Notes |
 |---|---|
 | `TurboQuantIndex(dim=None, bit_width=4)` | `bit_width ∈ {2, 4}`. `dim` is optional; when omitted it is inferred from the first `add` call. |
-| `add(vectors)` | `vectors` is a contiguous float32 array of shape `(n, dim)`. On a lazy index the first call locks `dim`; subsequent calls must match. |
+| `add(vectors)` | `vectors` is a contiguous float32 array of shape `(n, dim)`. On a lazy index the first call locks `dim`; subsequent calls must match. Raises `ValueError` on dim mismatch. |
 | `search(queries, k, *, mask=None)` | Returns `(scores, indices)`, both shape `(nq, effective_k)`. Indices are `int64` slot positions. `mask` is an optional `bool` array of length `len(idx)`; when given, only slots with `mask[i] == True` contribute. `effective_k = min(k, mask.sum())`. |
 | `swap_remove(idx)` | O(1). Moves the last vector into `idx`; returns the previous position of that moved vector (so external refs can be updated if needed). |
 | `prepare()` | Optional. Eagerly builds the rotation matrix, Lloyd-Max centroids and SIMD-blocked layout so the first `search` call doesn't pay the one-time cost. No-op on a lazy index that hasn't seen its first add. |
@@ -88,7 +88,7 @@ idx.add_with_ids(vectors, ids)           # locks dim to vectors.shape[1]
 | Method | Notes |
 |---|---|
 | `IdMapIndex(dim=None, bit_width=4)` | `dim` is optional; when omitted it is inferred from the first `add_with_ids` call. |
-| `add_with_ids(vectors, ids)` | `ids` is a `uint64` array with length `vectors.shape[0]`. Rejects duplicate ids (raises). On a lazy index the first call locks `dim`. |
+| `add_with_ids(vectors, ids)` | `ids` is a `uint64` array with length `vectors.shape[0]`. On a lazy index the first call locks `dim`. Raises `ValueError` on dim mismatch, duplicate ids, or `len(ids) != vectors.shape[0]`. |
 | `remove(id) -> bool` | `True` if the id was present and removed, `False` otherwise. O(1). |
 | `search(queries, k, *, allowlist=None)` | Returns `(scores, ids)` — `ids` are `uint64` external ids. `allowlist` is an optional `uint64` array of ids; when given, results are restricted to those ids and `effective_k = min(k, len(allowlist))`. Raises `ValueError` on empty allowlist and `KeyError` on unknown ids. |
 | `contains(id)` / `id in idx` | Membership. |

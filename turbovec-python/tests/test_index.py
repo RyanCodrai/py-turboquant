@@ -164,3 +164,9 @@ def test_search_after_swap_remove_reflects_new_layout():
 
     _, post = idx.search(vectors[19:20], k=1)
     assert post[0, 0] == 5, "vector that moved into slot 5 not found there"
+
+
+def test_add_with_mismatched_dim_raises_value_error():
+    idx = TurboQuantIndex(dim=128, bit_width=4)
+    with pytest.raises(ValueError, match="dim mismatch"):
+        idx.add(unit_vectors(3, 256))

@@ -241,7 +241,7 @@ fn allowlist_returns_only_listed_ids() {
     let data = gaussian_normalized(n, dim, 0xF11D_1001);
     let ids: Vec<u64> = (0..n as u64).map(|i| 1000 + i).collect();
     let mut idx = IdMapIndex::new(dim, 4);
-    idx.add_with_ids(&data, &ids);
+    idx.add_with_ids(&data, &ids).unwrap();
 
     let query = gaussian_normalized(1, dim, 0xF11D_1002);
     let allowed: Vec<u64> = vec![1003, 1010, 1042, 1077, 1099];
@@ -265,7 +265,7 @@ fn allowlist_none_equivalent_to_plain_search() {
     let data = gaussian_normalized(n, dim, 0xF11D_1003);
     let ids: Vec<u64> = (0..n as u64).map(|i| 7000 + i * 13).collect();
     let mut idx = IdMapIndex::new(dim, 4);
-    idx.add_with_ids(&data, &ids);
+    idx.add_with_ids(&data, &ids).unwrap();
 
     let query = gaussian_normalized(1, dim, 0xF11D_1004);
     let (s1, i1) = idx.search(&query, 5);
@@ -281,7 +281,7 @@ fn empty_allowlist_panics() {
     let data = gaussian_normalized(10, dim, 0xF11D_1005);
     let ids: Vec<u64> = (0..10).collect();
     let mut idx = IdMapIndex::new(dim, 4);
-    idx.add_with_ids(&data, &ids);
+    idx.add_with_ids(&data, &ids).unwrap();
 
     let query = gaussian_normalized(1, dim, 0xF11D_1006);
     let _ = idx.search_with_allowlist(&query, 3, Some(&[]));
@@ -294,7 +294,7 @@ fn unknown_id_in_allowlist_panics() {
     let data = gaussian_normalized(10, dim, 0xF11D_1007);
     let ids: Vec<u64> = (0..10).collect();
     let mut idx = IdMapIndex::new(dim, 4);
-    idx.add_with_ids(&data, &ids);
+    idx.add_with_ids(&data, &ids).unwrap();
 
     let query = gaussian_normalized(1, dim, 0xF11D_1008);
     let _ = idx.search_with_allowlist(&query, 3, Some(&[5, 999]));
@@ -478,7 +478,7 @@ fn allowlist_survives_swap_remove() {
     let data = gaussian_normalized(n, dim, 0xF11D_1009);
     let ids: Vec<u64> = (0..n as u64).map(|i| 5000 + i).collect();
     let mut idx = IdMapIndex::new(dim, 4);
-    idx.add_with_ids(&data, &ids);
+    idx.add_with_ids(&data, &ids).unwrap();
 
     let allowed: Vec<u64> = vec![5005, 5015, 5020];
     let query = gaussian_normalized(1, dim, 0xF11D_100A);

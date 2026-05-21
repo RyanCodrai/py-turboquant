@@ -36,12 +36,14 @@
 
 pub mod codebook;
 pub mod encode;
+pub mod error;
 pub mod id_map;
 pub mod io;
 pub mod pack;
 pub mod rotation;
 pub mod search;
 
+pub use error::AddError;
 pub use id_map::IdMapIndex;
 
 use std::path::Path;
@@ -192,18 +194,25 @@ impl TurboQuantIndex {
     /// This is the form that bindings with shape information (e.g. the
     /// Python binding receiving a 2D numpy array) should use, since a
     /// flat `&[f32]` alone is ambiguous about its shape.
-    pub fn add_2d(&mut self, vectors: &[f32], dim: usize) {
+    ///
+    /// Returns [`AddError::DimMismatch`] if `dim` does not match the
+    /// already-locked dim, and [`AddError::DimNotMultipleOf8`] when
+    /// committing a lazy index to a dim that is not a multiple of 8.
+    pub fn add_2d(&mut self, vectors: &[f32], dim: usize) -> Result<(), AddError> {
         match self.dim {
-            Some(existing) => assert_eq!(
-                existing, dim,
-                "dim mismatch: index dim={existing}, batch dim={dim}"
-            ),
+            Some(existing) if existing != dim => {
+                return Err(AddError::DimMismatch { existing, got: dim });
+            }
+            Some(_) => {}
             None => {
-                assert!(dim % 8 == 0, "dim must be a multiple of 8");
+                if dim % 8 != 0 {
+                    return Err(AddError::DimNotMultipleOf8(dim));
+                }
                 self.dim = Some(dim);
             }
         }
         self.add(vectors);
+        Ok(())
     }
 
     /// Run a top-`k` search against the index.

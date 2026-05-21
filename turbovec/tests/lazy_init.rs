@@ -74,7 +74,7 @@ fn new_lazy_starts_with_no_dim() {
 fn add_2d_locks_dim_on_first_call() {
     let mut idx = TurboQuantIndex::new_lazy(4);
     let data = unit_vectors(3, DIM, 0xA00D_0001);
-    idx.add_2d(&data, DIM);
+    idx.add_2d(&data, DIM).unwrap();
     assert_eq!(idx.dim_opt(), Some(DIM));
     assert_eq!(idx.len(), 3);
 }
@@ -83,20 +83,26 @@ fn add_2d_locks_dim_on_first_call() {
 fn add_2d_subsequent_calls_must_match_dim() {
     let mut idx = TurboQuantIndex::new_lazy(4);
     let data1 = unit_vectors(2, DIM, 0xA00D_0002);
-    idx.add_2d(&data1, DIM);
+    idx.add_2d(&data1, DIM).unwrap();
     let data2 = unit_vectors(2, DIM, 0xA00D_0003);
-    idx.add_2d(&data2, DIM);
+    idx.add_2d(&data2, DIM).unwrap();
     assert_eq!(idx.len(), 4);
 }
 
 #[test]
-#[should_panic(expected = "dim mismatch")]
-fn add_2d_panics_on_dim_change() {
+fn add_2d_rejects_dim_change() {
     let mut idx = TurboQuantIndex::new_lazy(4);
     let data = unit_vectors(1, DIM, 0xA00D_0004);
-    idx.add_2d(&data, DIM);
+    idx.add_2d(&data, DIM).unwrap();
     let wrong = unit_vectors(1, DIM * 2, 0xA00D_0005);
-    idx.add_2d(&wrong, DIM * 2);
+    let err = idx.add_2d(&wrong, DIM * 2).unwrap_err();
+    assert_eq!(
+        err,
+        turbovec::AddError::DimMismatch {
+            existing: DIM,
+            got: DIM * 2,
+        },
+    );
 }
 
 #[test]
@@ -157,7 +163,7 @@ fn write_load_round_trip_lazy_after_committed_add() {
     let tmp = std::env::temp_dir().join("turbovec_lazy_committed.tv");
     {
         let mut idx = TurboQuantIndex::new_lazy(2);
-        idx.add_2d(&unit_vectors(3, DIM, 0xA00D_0009), DIM);
+        idx.add_2d(&unit_vectors(3, DIM, 0xA00D_0009), DIM).unwrap();
         idx.write(&tmp).unwrap();
     }
     let loaded = TurboQuantIndex::load(&tmp).unwrap();
@@ -182,7 +188,7 @@ fn id_map_add_with_ids_2d_locks_dim() {
     let mut idx = IdMapIndex::new_lazy(4);
     let data = unit_vectors(3, DIM, 0xA00D_0010);
     let ids: Vec<u64> = vec![10, 20, 30];
-    idx.add_with_ids_2d(&data, DIM, &ids);
+    idx.add_with_ids_2d(&data, DIM, &ids).unwrap();
     assert_eq!(idx.dim_opt(), Some(DIM));
     assert_eq!(idx.len(), 3);
     assert!(idx.contains(20));
@@ -193,7 +199,7 @@ fn id_map_add_with_ids_2d_locks_dim() {
 fn id_map_plain_add_with_ids_panics_on_lazy_uncommitted() {
     let mut idx = IdMapIndex::new_lazy(4);
     let data = unit_vectors(1, DIM, 0xA00D_0011);
-    idx.add_with_ids(&data, &[42]);
+    idx.add_with_ids(&data, &[42]).unwrap();
 }
 
 #[test]
@@ -225,7 +231,7 @@ fn id_map_write_load_round_trip_lazy_after_committed_add() {
     let ids: Vec<u64> = vec![100, 200, 300];
     {
         let mut idx = IdMapIndex::new_lazy(4);
-        idx.add_with_ids_2d(&unit_vectors(3, DIM, 0xA00D_0013), DIM, &ids);
+        idx.add_with_ids_2d(&unit_vectors(3, DIM, 0xA00D_0013), DIM, &ids).unwrap();
         idx.write(&tmp).unwrap();
     }
     let loaded = IdMapIndex::load(&tmp).unwrap();
