@@ -35,7 +35,15 @@ jobs:
             elif command -v yum >/dev/null 2>&1; then
               yum install -y openblas-devel openssl-devel pkgconfig
             elif command -v apt-get >/dev/null 2>&1; then
-              apt-get update && apt-get install -y libopenblas-dev libssl-dev pkg-config
+              # The maturin-action container is x86_64 even when targeting
+              # aarch64 (cross-compilation). Enable multi-arch and install
+              # libopenblas for both arches so the cross-linker can find
+              # the aarch64 variant when needed.
+              dpkg --add-architecture arm64
+              apt-get update
+              apt-get install -y \
+                libopenblas-dev libopenblas-dev:arm64 \
+                libssl-dev pkg-config
             else
               echo "No supported package manager found" && exit 1
             fi
