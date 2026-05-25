@@ -15,7 +15,7 @@
 //! ```no_run
 //! use turbovec::IdMapIndex;
 //!
-//! let mut index = IdMapIndex::new(1536, 4);
+//! let mut index = IdMapIndex::new(1536, 4).unwrap();
 //! let vectors: Vec<f32> = vec![0.0; 1536 * 3];
 //! index.add_with_ids(&vectors, &[1001, 1002, 1003]).unwrap();
 //!
@@ -39,7 +39,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::io;
-use crate::{AddError, TurboQuantIndex};
+use crate::{AddError, ConstructError, TurboQuantIndex};
 
 /// ID-addressed wrapper around [`TurboQuantIndex`].
 pub struct IdMapIndex {
@@ -53,24 +53,25 @@ pub struct IdMapIndex {
 
 impl IdMapIndex {
     /// Construct an id-map index with a known dim. The dim is locked at
-    /// construction.
-    pub fn new(dim: usize, bit_width: usize) -> Self {
-        Self {
-            inner: TurboQuantIndex::new(dim, bit_width),
+    /// construction. Propagates the same errors as
+    /// [`TurboQuantIndex::new`].
+    pub fn new(dim: usize, bit_width: usize) -> Result<Self, ConstructError> {
+        Ok(Self {
+            inner: TurboQuantIndex::new(dim, bit_width)?,
             slot_to_id: Vec::new(),
             id_to_slot: HashMap::new(),
-        }
+        })
     }
 
     /// Construct an empty id-map index without committing to a dim. The
     /// dim is inferred and locked on the first [`Self::add_with_ids_2d`]
-    /// call.
-    pub fn new_lazy(bit_width: usize) -> Self {
-        Self {
-            inner: TurboQuantIndex::new_lazy(bit_width),
+    /// call. Propagates the same errors as [`TurboQuantIndex::new_lazy`].
+    pub fn new_lazy(bit_width: usize) -> Result<Self, ConstructError> {
+        Ok(Self {
+            inner: TurboQuantIndex::new_lazy(bit_width)?,
             slot_to_id: Vec::new(),
             id_to_slot: HashMap::new(),
-        }
+        })
     }
 
     /// Add `n = vectors.len() / dim` vectors with the given external ids.

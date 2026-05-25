@@ -85,7 +85,7 @@ fn self_query_returns_self_top1_4bit() {
 
     for &n in TAIL_SIZES {
         let data = gaussian_normalized(n, dim, 0x5EED_0000 ^ n as u64);
-        let mut idx = TurboQuantIndex::new(dim, bits);
+        let mut idx = TurboQuantIndex::new(dim, bits).unwrap();
         idx.add(&data);
         assert_eq!(idx.len(), n);
 
@@ -114,7 +114,7 @@ fn self_query_returns_self_top3_2bit() {
 
     for &n in TAIL_SIZES {
         let data = gaussian_normalized(n, dim, 0xC0FF_EE00 ^ n as u64);
-        let mut idx = TurboQuantIndex::new(dim, bits);
+        let mut idx = TurboQuantIndex::new(dim, bits).unwrap();
         idx.add(&data);
 
         let nq = n.min(8);
@@ -145,7 +145,7 @@ fn search_scores_are_sorted_descending() {
     for bits in [2usize, 3, 4] {
         for &n in &[64usize, 100, 128, 200, 256, 500] {
             let data = gaussian_normalized(n, dim, 0xA11CE ^ (n as u64) ^ (bits as u64));
-            let mut idx = TurboQuantIndex::new(dim, bits);
+            let mut idx = TurboQuantIndex::new(dim, bits).unwrap();
             idx.add(&data);
 
             let q = &data[..4 * dim];
@@ -175,7 +175,7 @@ fn search_is_deterministic_for_same_query() {
     let bits = 4;
     for &n in &[64usize, 65, 127, 128, 129, 500] {
         let data = gaussian_normalized(n, dim, 0xD0D0_D0D0 ^ n as u64);
-        let mut idx = TurboQuantIndex::new(dim, bits);
+        let mut idx = TurboQuantIndex::new(dim, bits).unwrap();
         idx.add(&data);
 
         let q = &data[..3 * dim];
@@ -203,7 +203,7 @@ fn single_query_matches_batched_query() {
     let bits = 4;
     let n = 500;
     let data = gaussian_normalized(n, dim, 0x1234_5678);
-    let mut idx = TurboQuantIndex::new(dim, bits);
+    let mut idx = TurboQuantIndex::new(dim, bits).unwrap();
     idx.add(&data);
 
     let batch = &data[..5 * dim];
@@ -247,7 +247,7 @@ fn concurrent_search_matches_serial() {
     let bits = 4;
     let n = 500;
     let data = gaussian_normalized(n, dim, 0xFACE_CAFE);
-    let mut idx = TurboQuantIndex::new(dim, bits);
+    let mut idx = TurboQuantIndex::new(dim, bits).unwrap();
     idx.add(&data);
     let idx = Arc::new(idx);
 

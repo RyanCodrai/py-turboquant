@@ -112,3 +112,22 @@ def test_write_and_load_round_trip(tmp_path):
 def test_load_rejects_nonexistent_file():
     with pytest.raises(IOError):
         IdMapIndex.load("/nonexistent/path/does-not-exist.tvim")
+
+
+@pytest.mark.parametrize("bad_bit_width", [0, 1, 5, 8])
+def test_constructor_rejects_bad_bit_width(bad_bit_width):
+    with pytest.raises(ValueError, match="bit_width"):
+        IdMapIndex(dim=128, bit_width=bad_bit_width)
+
+
+@pytest.mark.parametrize("bad_dim", [0, 1, 4, 7, 9])
+def test_constructor_rejects_bad_dim(bad_dim):
+    with pytest.raises(ValueError, match="dim"):
+        IdMapIndex(dim=bad_dim, bit_width=4)
+
+
+def test_search_on_empty_eager_index_returns_zero_effective_k():
+    idx = IdMapIndex(dim=128, bit_width=4)
+    q = unit_vectors(1, 128)
+    _, ids = idx.search(q, k=3)
+    assert ids.shape == (1, 0)

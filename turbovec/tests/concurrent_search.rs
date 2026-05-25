@@ -45,7 +45,7 @@ fn build_index() -> TurboQuantIndex {
     let n = 1_024;
 
     let vectors = make_vectors(n, dim, 1);
-    let mut index = TurboQuantIndex::new(dim, bit_width);
+    let mut index = TurboQuantIndex::new(dim, bit_width).unwrap();
     index.add(&vectors);
     assert_eq!(index.len(), n);
     index

@@ -57,7 +57,7 @@ fn gaussian_normalized(n: usize, dim: usize, seed: u64) -> Vec<f32> {
 fn swap_remove_shrinks_length_and_returns_last_index() {
     let dim = 256;
     let data = gaussian_normalized(10, dim, 0xDE1E_7E00);
-    let mut idx = TurboQuantIndex::new(dim, 4);
+    let mut idx = TurboQuantIndex::new(dim, 4).unwrap();
     idx.add(&data);
     assert_eq!(idx.len(), 10);
 
@@ -70,7 +70,7 @@ fn swap_remove_shrinks_length_and_returns_last_index() {
 fn swap_remove_last_is_no_swap() {
     let dim = 256;
     let data = gaussian_normalized(5, dim, 0xDE1E_7E01);
-    let mut idx = TurboQuantIndex::new(dim, 4);
+    let mut idx = TurboQuantIndex::new(dim, 4).unwrap();
     idx.add(&data);
 
     // Removing the last element: moved_from == idx, no actual swap.
@@ -88,7 +88,7 @@ fn search_after_swap_remove_reflects_new_layout() {
     let n = 100;
     let data = gaussian_normalized(n, dim, 0xDE1E_7E02);
 
-    let mut idx = TurboQuantIndex::new(dim, 4);
+    let mut idx = TurboQuantIndex::new(dim, 4).unwrap();
     idx.add(&data);
 
     // Prime the cache with a self-query.
@@ -119,7 +119,7 @@ fn deleted_vector_no_longer_returned() {
     let n = 64;
     let data = gaussian_normalized(n, dim, 0xDE1E_7E03);
 
-    let mut idx = TurboQuantIndex::new(dim, 4);
+    let mut idx = TurboQuantIndex::new(dim, 4).unwrap();
     idx.add(&data);
 
     // Remove vector 7. Query with it: top-1 must NOT be 7 (that slot
@@ -144,7 +144,7 @@ fn remaining_vectors_still_self_query_correctly() {
     let n = 80;
     let data = gaussian_normalized(n, dim, 0xDE1E_7E04);
 
-    let mut idx = TurboQuantIndex::new(dim, 4);
+    let mut idx = TurboQuantIndex::new(dim, 4).unwrap();
     idx.add(&data);
 
     // Delete a handful of non-adjacent positions.
@@ -178,7 +178,7 @@ fn remaining_vectors_still_self_query_correctly() {
 fn swap_remove_out_of_bounds_panics() {
     let dim = 128;
     let data = gaussian_normalized(3, dim, 0xDE1E_7E05);
-    let mut idx = TurboQuantIndex::new(dim, 4);
+    let mut idx = TurboQuantIndex::new(dim, 4).unwrap();
     idx.add(&data);
     idx.swap_remove(3); // valid range is 0..3
 }

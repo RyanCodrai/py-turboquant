@@ -56,7 +56,7 @@ fn gaussian_normalized(n: usize, dim: usize, seed: u64) -> Vec<f32> {
 fn add_with_ids_updates_len_and_contains() {
     let dim = 128;
     let data = gaussian_normalized(5, dim, 0xA11D_0000);
-    let mut idx = IdMapIndex::new(dim, 4);
+    let mut idx = IdMapIndex::new(dim, 4).unwrap();
     idx.add_with_ids(&data, &[100, 200, 300, 400, 500]).unwrap();
 
     assert_eq!(idx.len(), 5);
@@ -68,7 +68,7 @@ fn add_with_ids_updates_len_and_contains() {
 fn search_returns_ids_not_slots() {
     let dim = 256;
     let data = gaussian_normalized(10, dim, 0xA11D_0001);
-    let mut idx = IdMapIndex::new(dim, 4);
+    let mut idx = IdMapIndex::new(dim, 4).unwrap();
     let ids: Vec<u64> = (1_000_000..1_000_010).collect();
     idx.add_with_ids(&data, &ids).unwrap();
 
@@ -84,7 +84,7 @@ fn search_returns_ids_not_slots() {
 fn remove_returns_false_for_missing_id() {
     let dim = 128;
     let data = gaussian_normalized(3, dim, 0xA11D_0002);
-    let mut idx = IdMapIndex::new(dim, 4);
+    let mut idx = IdMapIndex::new(dim, 4).unwrap();
     idx.add_with_ids(&data, &[1, 2, 3]).unwrap();
 
     assert!(!idx.remove(999));
@@ -95,7 +95,7 @@ fn remove_returns_false_for_missing_id() {
 fn remove_existing_id_shrinks_and_hides_it() {
     let dim = 256;
     let data = gaussian_normalized(10, dim, 0xA11D_0003);
-    let mut idx = IdMapIndex::new(dim, 4);
+    let mut idx = IdMapIndex::new(dim, 4).unwrap();
     let ids: Vec<u64> = (0..10).map(|i| i as u64 * 7 + 11).collect();
     idx.add_with_ids(&data, &ids).unwrap();
 
@@ -115,7 +115,7 @@ fn remove_existing_id_shrinks_and_hides_it() {
 fn remaining_ids_still_self_query_after_mixed_removes() {
     let dim = 384;
     let data = gaussian_normalized(20, dim, 0xA11D_0004);
-    let mut idx = IdMapIndex::new(dim, 4);
+    let mut idx = IdMapIndex::new(dim, 4).unwrap();
     let ids: Vec<u64> = (0..20).map(|i| i as u64 * 100 + 5).collect();
     idx.add_with_ids(&data, &ids).unwrap();
 
@@ -148,7 +148,7 @@ fn remaining_ids_still_self_query_after_mixed_removes() {
 fn remove_then_re_add_same_id_is_allowed() {
     let dim = 128;
     let data = gaussian_normalized(5, dim, 0xA11D_0005);
-    let mut idx = IdMapIndex::new(dim, 4);
+    let mut idx = IdMapIndex::new(dim, 4).unwrap();
     idx.add_with_ids(&data, &[1, 2, 3, 4, 5]).unwrap();
 
     assert!(idx.remove(3));
@@ -165,7 +165,7 @@ fn remove_then_re_add_same_id_is_allowed() {
 fn add_with_ids_rejects_duplicate_id() {
     let dim = 128;
     let data = gaussian_normalized(5, dim, 0xA11D_0006);
-    let mut idx = IdMapIndex::new(dim, 4);
+    let mut idx = IdMapIndex::new(dim, 4).unwrap();
     idx.add_with_ids(&data[..2 * dim], &[1, 2]).unwrap();
     // Same id "2" already present.
     let err = idx
@@ -178,7 +178,7 @@ fn add_with_ids_rejects_duplicate_id() {
 fn add_with_ids_rejects_length_mismatch() {
     let dim = 128;
     let data = gaussian_normalized(5, dim, 0xA11D_0007);
-    let mut idx = IdMapIndex::new(dim, 4);
+    let mut idx = IdMapIndex::new(dim, 4).unwrap();
     // 5 vectors, only 3 ids.
     let err = idx.add_with_ids(&data, &[1, 2, 3]).unwrap_err();
     assert_eq!(
@@ -196,7 +196,7 @@ fn write_and_load_round_trips() {
     let data = gaussian_normalized(10, dim, 0xA11D_0100);
     let ids: Vec<u64> = (2000..2010).collect();
 
-    let mut idx = IdMapIndex::new(dim, 4);
+    let mut idx = IdMapIndex::new(dim, 4).unwrap();
     idx.add_with_ids(&data, &ids).unwrap();
 
     // Delete a few to exercise non-identity slot_to_id mapping.
@@ -236,7 +236,7 @@ fn load_rejects_wrong_magic() {
     // Write a file that starts with the `.tv` format instead of `TVIM`.
     let dim = 64;
     let data = gaussian_normalized(2, dim, 0xA11D_0101);
-    let mut inner = IdMapIndex::new(dim, 4);
+    let mut inner = IdMapIndex::new(dim, 4).unwrap();
     inner.add_with_ids(&data, &[1, 2]).unwrap();
     // Use the inner TurboQuantIndex's write to produce a .tv file.
     // We can't do that directly since inner is private; simulate with
@@ -250,7 +250,7 @@ fn load_rejects_wrong_magic() {
 #[test]
 fn empty_index_round_trip() {
     let dim = 128;
-    let idx = IdMapIndex::new(dim, 4);
+    let idx = IdMapIndex::new(dim, 4).unwrap();
 
     let tmp = std::env::temp_dir().join(format!(
         "turbovec_idmap_empty_{}.tvim",

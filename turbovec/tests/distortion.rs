@@ -196,7 +196,7 @@ fn self_query_recall_at_1() {
     let n = 200;
     let vectors = unit_sphere_vectors(n, dim, 0);
 
-    let mut index = TurboQuantIndex::new(dim, 4);
+    let mut index = TurboQuantIndex::new(dim, 4).unwrap();
     index.add(&vectors);
     index.prepare();
 
@@ -224,7 +224,7 @@ struct ScoreStats {
 /// Mean and stddev of top-1 self-query scores.
 fn self_score_stats(vectors: &[f32], dim: usize, bits: usize) -> ScoreStats {
     let n = vectors.len() / dim;
-    let mut index = TurboQuantIndex::new(dim, bits);
+    let mut index = TurboQuantIndex::new(dim, bits).unwrap();
     index.add(vectors);
     index.prepare();
 
@@ -246,7 +246,7 @@ fn self_score_stats(vectors: &[f32], dim: usize, bits: usize) -> ScoreStats {
 /// longer exposes under the corrected estimator.
 fn cross_score_stats(database: &[f32], queries: &[f32], dim: usize, bits: usize) -> ScoreStats {
     let n_q = queries.len() / dim;
-    let mut index = TurboQuantIndex::new(dim, bits);
+    let mut index = TurboQuantIndex::new(dim, bits).unwrap();
     index.add(database);
     index.prepare();
 

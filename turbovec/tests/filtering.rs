@@ -55,7 +55,7 @@ fn gaussian_normalized(n: usize, dim: usize, seed: u64) -> Vec<f32> {
 
 fn build_index(n: usize, dim: usize, seed: u64) -> TurboQuantIndex {
     let data = gaussian_normalized(n, dim, seed);
-    let mut idx = TurboQuantIndex::new(dim, 4);
+    let mut idx = TurboQuantIndex::new(dim, 4).unwrap();
     idx.add(&data);
     idx
 }
@@ -240,7 +240,7 @@ fn allowlist_returns_only_listed_ids() {
     let n = 100;
     let data = gaussian_normalized(n, dim, 0xF11D_1001);
     let ids: Vec<u64> = (0..n as u64).map(|i| 1000 + i).collect();
-    let mut idx = IdMapIndex::new(dim, 4);
+    let mut idx = IdMapIndex::new(dim, 4).unwrap();
     idx.add_with_ids(&data, &ids).unwrap();
 
     let query = gaussian_normalized(1, dim, 0xF11D_1002);
@@ -264,7 +264,7 @@ fn allowlist_none_equivalent_to_plain_search() {
     let n = 80;
     let data = gaussian_normalized(n, dim, 0xF11D_1003);
     let ids: Vec<u64> = (0..n as u64).map(|i| 7000 + i * 13).collect();
-    let mut idx = IdMapIndex::new(dim, 4);
+    let mut idx = IdMapIndex::new(dim, 4).unwrap();
     idx.add_with_ids(&data, &ids).unwrap();
 
     let query = gaussian_normalized(1, dim, 0xF11D_1004);
@@ -280,7 +280,7 @@ fn empty_allowlist_panics() {
     let dim = 64;
     let data = gaussian_normalized(10, dim, 0xF11D_1005);
     let ids: Vec<u64> = (0..10).collect();
-    let mut idx = IdMapIndex::new(dim, 4);
+    let mut idx = IdMapIndex::new(dim, 4).unwrap();
     idx.add_with_ids(&data, &ids).unwrap();
 
     let query = gaussian_normalized(1, dim, 0xF11D_1006);
@@ -293,7 +293,7 @@ fn unknown_id_in_allowlist_panics() {
     let dim = 64;
     let data = gaussian_normalized(10, dim, 0xF11D_1007);
     let ids: Vec<u64> = (0..10).collect();
-    let mut idx = IdMapIndex::new(dim, 4);
+    let mut idx = IdMapIndex::new(dim, 4).unwrap();
     idx.add_with_ids(&data, &ids).unwrap();
 
     let query = gaussian_normalized(1, dim, 0xF11D_1008);
@@ -310,7 +310,7 @@ fn block_skip_at_one_percent_selectivity_matches_post_filter() {
     let dim = 128;
     let n = 4096;  // 128 blocks of 32 — gives the skip path plenty to skip
     let data = gaussian_normalized(n, dim, 0xB10C_5417);
-    let mut idx = TurboQuantIndex::new(dim, 4);
+    let mut idx = TurboQuantIndex::new(dim, 4).unwrap();
     idx.add(&data);
     idx.prepare();
 
@@ -366,7 +366,7 @@ fn block_skip_at_extreme_selectivity_returns_only_allowed() {
     let dim = 64;
     let n = 8192;
     let data = gaussian_normalized(n, dim, 0xB10C_5419);
-    let mut idx = TurboQuantIndex::new(dim, 4);
+    let mut idx = TurboQuantIndex::new(dim, 4).unwrap();
     idx.add(&data);
     idx.prepare();
 
@@ -407,7 +407,7 @@ fn block_skip_path_actually_fires_under_selective_mask() {
     let dim = 64;
     let n = 4096; // 128 blocks of 32
     let data = gaussian_normalized(n, dim, 0xC0DE_5417);
-    let mut idx = TurboQuantIndex::new(dim, 4);
+    let mut idx = TurboQuantIndex::new(dim, 4).unwrap();
     idx.add(&data);
     idx.prepare();
 
@@ -454,7 +454,7 @@ fn block_skip_with_all_slots_allowed_matches_unmasked() {
     let dim = 64;
     let n = 1024;
     let data = gaussian_normalized(n, dim, 0xB10C_541B);
-    let mut idx = TurboQuantIndex::new(dim, 4);
+    let mut idx = TurboQuantIndex::new(dim, 4).unwrap();
     idx.add(&data);
     idx.prepare();
 
@@ -477,7 +477,7 @@ fn allowlist_survives_swap_remove() {
     let n = 30;
     let data = gaussian_normalized(n, dim, 0xF11D_1009);
     let ids: Vec<u64> = (0..n as u64).map(|i| 5000 + i).collect();
-    let mut idx = IdMapIndex::new(dim, 4);
+    let mut idx = IdMapIndex::new(dim, 4).unwrap();
     idx.add_with_ids(&data, &ids).unwrap();
 
     let allowed: Vec<u64> = vec![5005, 5015, 5020];
