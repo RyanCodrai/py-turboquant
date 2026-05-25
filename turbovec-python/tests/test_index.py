@@ -26,7 +26,7 @@ def test_new_reports_dim_and_bit_width():
     assert len(idx) == 0
 
 
-@pytest.mark.parametrize("bit_width", [2, 4])
+@pytest.mark.parametrize("bit_width", [2, 3, 4])
 def test_bit_width_options(bit_width):
     idx = TurboQuantIndex(dim=128, bit_width=bit_width)
     assert idx.bit_width == bit_width
