@@ -35,14 +35,42 @@ fn tv_round_trip_current_format() {
     let packed = vec![0xABu8; (dim / 8) * bit_width * n_vectors];
     let scales = vec![1.5f32, 2.5, 3.5];
 
-    write(&path, bit_width, dim, n_vectors, &packed, &scales).unwrap();
-    let (bw, d, n, p, s) = load(&path).unwrap();
+    // Round-trip with empty TQ+ calibration (identity); behaviour identical
+    // to a v2 file otherwise. Separate test below covers populated calibration.
+    write(&path, bit_width, dim, n_vectors, &packed, &scales, &[], &[]).unwrap();
+    let (bw, d, n, p, s, shift, scale_tq) = load(&path).unwrap();
 
     assert_eq!(bw, bit_width);
     assert_eq!(d, dim);
     assert_eq!(n, n_vectors);
     assert_eq!(p, packed);
     assert_eq!(s, scales);
+    assert!(shift.is_empty());
+    assert!(scale_tq.is_empty());
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn tv_round_trip_with_tqplus_calibration() {
+    let path = temp_path("v3-tqplus.tv");
+    let bit_width = 4;
+    let dim = 32;
+    let n_vectors = 3;
+    let packed = vec![0xABu8; (dim / 8) * bit_width * n_vectors];
+    let scales = vec![1.5f32, 2.5, 3.5];
+    let shift: Vec<f32> = (0..dim).map(|d| d as f32 * 0.01).collect();
+    let scale_tq: Vec<f32> = (0..dim).map(|d| 1.0 + d as f32 * 0.02).collect();
+
+    write(&path, bit_width, dim, n_vectors, &packed, &scales, &shift, &scale_tq).unwrap();
+    let (bw, d, n, p, s, loaded_shift, loaded_scale) = load(&path).unwrap();
+
+    assert_eq!(bw, bit_width);
+    assert_eq!(d, dim);
+    assert_eq!(n, n_vectors);
+    assert_eq!(p, packed);
+    assert_eq!(s, scales);
+    assert_eq!(loaded_shift, shift);
+    assert_eq!(loaded_scale, scale_tq);
     std::fs::remove_file(&path).ok();
 }
 
@@ -81,14 +109,16 @@ fn tvim_round_trip_current_format() {
     let scales = vec![0.5f32, 1.0, 1.5, 2.0];
     let ids = vec![100u64, 200, 300, 400];
 
-    write_id_map(&path, bit_width, dim, n_vectors, &packed, &scales, &ids).unwrap();
-    let (bw, d, n, p, s, slot_to_id) = load_id_map(&path).unwrap();
+    write_id_map(&path, bit_width, dim, n_vectors, &packed, &scales, &[], &[], &ids).unwrap();
+    let (bw, d, n, p, s, shift, scale_tq, slot_to_id) = load_id_map(&path).unwrap();
 
     assert_eq!(bw, bit_width);
     assert_eq!(d, dim);
     assert_eq!(n, n_vectors);
     assert_eq!(p, packed);
     assert_eq!(s, scales);
+    assert!(shift.is_empty());
+    assert!(scale_tq.is_empty());
     assert_eq!(slot_to_id, ids);
     std::fs::remove_file(&path).ok();
 }

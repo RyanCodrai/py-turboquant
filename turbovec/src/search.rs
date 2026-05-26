@@ -1023,6 +1023,45 @@ pub(crate) fn block_pair_has_allowed(mask: Option<&[u64]>, base_vec_pair: usize)
     }
 }
 
+/// Apply TQ+ per-coord (shift, scale) calibration to a batch of rotated
+/// queries. Returns the calibrated queries and a per-query bias correction
+/// (the search kernel folds this into the per-query bias). When the index
+/// has no calibration (v2 file, lazy index with no add), returns the
+/// queries unchanged and zero bias corrections.
+fn calibrate_queries(
+    q_rot: &[f32],
+    tqplus_shift: &[f32],
+    tqplus_scale: &[f32],
+    nq: usize,
+    dim: usize,
+) -> (Vec<f32>, Vec<f32>) {
+    if tqplus_shift.is_empty() {
+        debug_assert!(tqplus_scale.is_empty());
+        return (q_rot.to_vec(), vec![0.0f32; nq]);
+    }
+    debug_assert_eq!(tqplus_shift.len(), dim);
+    debug_assert_eq!(tqplus_scale.len(), dim);
+
+    let mut q_calib = vec![0.0f32; nq * dim];
+    let mut bias_corrs = vec![0.0f32; nq];
+
+    q_calib
+        .par_chunks_mut(dim)
+        .zip(bias_corrs.par_iter_mut())
+        .enumerate()
+        .for_each(|(qi, (calib_row, bias))| {
+            let q_row = &q_rot[qi * dim..(qi + 1) * dim];
+            let mut bc = 0.0f64;
+            for d in 0..dim {
+                calib_row[d] = q_row[d] / tqplus_scale[d];
+                bc -= (q_row[d] as f64) * (tqplus_shift[d] as f64);
+            }
+            *bias = bc as f32;
+        });
+
+    (q_calib, bias_corrs)
+}
+
 /// Full search: rotation + LUT build + scoring + heap top-k.
 ///
 /// `mask`: optional packed bitset over slots (one bit per vector,
@@ -1038,6 +1077,8 @@ pub fn search(
     blocked_codes: &[u8],
     centroids: &[f32],
     vec_scales: &[f32],
+    tqplus_shift: &[f32],     // empty for v2 indexes (identity calibration)
+    tqplus_scale: &[f32],     // empty for v2 indexes (identity calibration)
     bits: usize,
     dim: usize,
     n_vectors: usize,
@@ -1073,12 +1114,25 @@ pub fn search(
         );
     }
 
-    // Build LUTs in parallel
+    // TQ+ per-coord (shift, scale) was applied to the database at encode
+    // time. At search time we apply the inverse to the query:
+    //   q_calibrated[d] = q_rot[d] / scale_tq[d]
+    //   bias_corr_q     = - sum_d q_rot[d] * shift[d]
+    // The LUT build then runs against q_calibrated; bias_corr_q is folded
+    // into the per-query bias the kernel adds to every score. The SIMD
+    // kernel itself is unchanged.
+    let (q_for_lut, bias_corrs) =
+        calibrate_queries(&q_rot, tqplus_shift, tqplus_scale, nq, dim);
+
+    // Build LUTs in parallel; fold the TQ+ bias correction into each lut's
+    // bias so the kernel doesn't need to know TQ+ exists.
     let query_luts: Vec<QueryNeonLut> = (0..nq)
         .into_par_iter()
         .map(|qi| {
-            let row = &q_rot[qi * dim..(qi + 1) * dim];
-            build_query_neon_lut_from_slice(row, centroids, bits, dim)
+            let row = &q_for_lut[qi * dim..(qi + 1) * dim];
+            let mut lut = build_query_neon_lut_from_slice(row, centroids, bits, dim);
+            lut.bias += bias_corrs[qi];
+            lut
         })
         .collect();
 

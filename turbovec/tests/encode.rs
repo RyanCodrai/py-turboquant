@@ -35,8 +35,8 @@ fn produces_expected_shape() {
         let (boundaries, centroids) = codebook(bit_width, dim);
         let vectors = make_vectors(n, dim, 0);
 
-        let (packed, scales) = encode(
-            &vectors, n, dim, &rotation, &boundaries, &centroids, bit_width,
+        let (packed, scales, _, _) = encode(
+            &vectors, n, dim, &rotation, &boundaries, &centroids, bit_width, None,
         );
 
         let bytes_per_row = bit_width * (dim / 8);
@@ -64,7 +64,7 @@ fn scales_satisfy_rabitq_identity() {
     let (boundaries, centroids) = codebook(4, dim);
     let vectors = make_vectors(n, dim, 0);
 
-    let (_, scales) = encode(&vectors, n, dim, &rotation, &boundaries, &centroids, 4);
+    let (_, scales, _, _) = encode(&vectors, n, dim, &rotation, &boundaries, &centroids, 4, None);
 
     // Reconstruct <u, x_hat> per vector and check scale = ||v|| / <u, x_hat>.
     for i in 0..n {
@@ -115,8 +115,8 @@ fn deterministic_output() {
     let (boundaries, centroids) = codebook(4, dim);
     let vectors = make_vectors(n, dim, 0);
 
-    let (p1, s1) = encode(&vectors, n, dim, &rotation, &boundaries, &centroids, 4);
-    let (p2, s2) = encode(&vectors, n, dim, &rotation, &boundaries, &centroids, 4);
+    let (p1, s1, _, _) = encode(&vectors, n, dim, &rotation, &boundaries, &centroids, 4, None);
+    let (p2, s2, _, _) = encode(&vectors, n, dim, &rotation, &boundaries, &centroids, 4, None);
 
     assert_eq!(p1, p2);
     assert_eq!(s1, s2);
@@ -130,7 +130,7 @@ fn handles_zero_vector() {
     let (boundaries, centroids) = codebook(4, dim);
     let zeros = vec![0.0f32; dim];
 
-    let (packed, scales) = encode(&zeros, 1, dim, &rotation, &boundaries, &centroids, 4);
+    let (packed, scales, _, _) = encode(&zeros, 1, dim, &rotation, &boundaries, &centroids, 4, None);
 
     // ||v|| = 0 => scale = 0 / <u, x_hat>_floor = 0
     assert_eq!(scales[0], 0.0);

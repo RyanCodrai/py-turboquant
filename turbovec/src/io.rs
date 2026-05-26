@@ -3,37 +3,41 @@
 //! Two formats live here:
 //! * `.tv` — [`TurboQuantIndex`](crate::TurboQuantIndex) — 4-byte magic
 //!   "TVPI" + version + bit_width/dim/n_vectors header + packed codes +
-//!   per-vector scales.
+//!   per-vector scales + (v3+) TQ+ per-coord calibration.
 //! * `.tvim` — [`IdMapIndex`](crate::IdMapIndex) — 4-byte magic "TVIM"
 //!   + version + the same core-index payload + a trailing `slot_to_id`
 //!   table of `u64` values.
 //!
 //! ## Format versioning
 //!
-//! Both formats are at version 2 as of turbovec 0.4.4. Version 1 (turbovec
-//! ≤ 0.4.3) stored `||v||` in the per-vector slot; version 2 stores
-//! `||v|| / <u_rot, x̂>` (the length-renormalized correction). The two are
-//! the same on-disk shape but mean different things; loading a v1 file
-//! under v2 code would silently produce wrong search scores, so we
-//! refuse the load with a clear error pointing the caller at a rebuild.
+//! Both formats are at version 3 as of turbovec 0.6.x (TQ+ per-coord
+//! calibration). Version 2 (turbovec 0.4.4 .. 0.6.0) is loaded transparently
+//! with empty calibration — the index behaves like the old encoding, with
+//! no recall change and no TQ+ gain. Re-encoding from source vectors picks
+//! up the new calibration. Version 1 (turbovec ≤ 0.4.3) is incompatible
+//! and refused with a rebuild hint.
 //!
 //! Version 1 `.tv` files had no magic — the file started with a bare
-//! bit_width byte (2/3/4). Version 2 prepends magic + version, which
-//! lets us detect either v2 or "looks like a v1 turbovec file" cleanly.
+//! bit_width byte (2/3/4). Version 2+ prepends magic + version, which
+//! lets us detect either a current file or "looks like a v1 turbovec
+//! file" cleanly.
 
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
 const TV_MAGIC: &[u8; 4] = b"TVPI";
-const TV_VERSION: u8 = 2;
+const TV_VERSION: u8 = 3;
 const TVIM_MAGIC: &[u8; 4] = b"TVIM";
-const TVIM_VERSION: u8 = 2;
+const TVIM_VERSION: u8 = 3;
 
 const REBUILD_HINT: &str =
     "Rebuild this index from the source vectors using turbovec 0.4.4 or later \
      (no in-place migration is provided; the format version 2 changes the meaning \
      of the per-vector scalar from ||v|| to a length-renormalization correction).";
+
+/// Core payload — what a fully-deserialized index needs.
+type CoreLoad = (usize, usize, usize, Vec<u8>, Vec<f32>, Vec<f32>, Vec<f32>);
 
 /// `.tv` write — positional index.
 pub fn write(
@@ -43,17 +47,24 @@ pub fn write(
     n_vectors: usize,
     packed_codes: &[u8],
     scales: &[f32],
+    tqplus_shift: &[f32],
+    tqplus_scale: &[f32],
 ) -> io::Result<()> {
     let mut f = BufWriter::new(File::create(path)?);
     f.write_all(TV_MAGIC)?;
     f.write_all(&[TV_VERSION])?;
-    write_core(&mut f, bit_width, dim, n_vectors, packed_codes, scales)?;
+    write_core(
+        &mut f, bit_width, dim, n_vectors, packed_codes, scales,
+        tqplus_shift, tqplus_scale,
+    )?;
     f.flush()?;
     Ok(())
 }
 
-/// `.tv` load — positional index.
-pub fn load(path: impl AsRef<Path>) -> io::Result<(usize, usize, usize, Vec<u8>, Vec<f32>)> {
+/// `.tv` load — positional index. Transparently handles v2 (no TQ+) and
+/// v3 (with TQ+) files; v2 returns empty TQ+ vectors which the engine
+/// treats as identity calibration.
+pub fn load(path: impl AsRef<Path>) -> io::Result<CoreLoad> {
     let mut f = BufReader::new(File::open(path)?);
 
     let mut magic = [0u8; 4];
@@ -81,16 +92,7 @@ pub fn load(path: impl AsRef<Path>) -> io::Result<(usize, usize, usize, Vec<u8>,
     }
     let mut version = [0u8; 1];
     f.read_exact(&mut version)?;
-    if version[0] != TV_VERSION {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "unsupported .tv format version: {} (this build expects version {})",
-                version[0], TV_VERSION,
-            ),
-        ));
-    }
-    read_core(&mut f)
+    read_core_versioned(&mut f, version[0], TV_VERSION, ".tv")
 }
 
 /// `.tvim` write — positional index plus the id-map side-tables.
@@ -101,6 +103,8 @@ pub fn write_id_map(
     n_vectors: usize,
     packed_codes: &[u8],
     scales: &[f32],
+    tqplus_shift: &[f32],
+    tqplus_scale: &[f32],
     slot_to_id: &[u64],
 ) -> io::Result<()> {
     assert_eq!(
@@ -114,7 +118,10 @@ pub fn write_id_map(
     let mut f = BufWriter::new(File::create(path)?);
     f.write_all(TVIM_MAGIC)?;
     f.write_all(&[TVIM_VERSION])?;
-    write_core(&mut f, bit_width, dim, n_vectors, packed_codes, scales)?;
+    write_core(
+        &mut f, bit_width, dim, n_vectors, packed_codes, scales,
+        tqplus_shift, tqplus_scale,
+    )?;
 
     for &id in slot_to_id {
         f.write_all(&id.to_le_bytes())?;
@@ -126,7 +133,7 @@ pub fn write_id_map(
 /// `.tvim` load — positional index plus the id-map side-tables.
 pub fn load_id_map(
     path: impl AsRef<Path>,
-) -> io::Result<(usize, usize, usize, Vec<u8>, Vec<f32>, Vec<u64>)> {
+) -> io::Result<(usize, usize, usize, Vec<u8>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<u64>)> {
     let mut f = BufReader::new(File::open(path)?);
 
     let mut magic = [0u8; 4];
@@ -150,17 +157,8 @@ pub fn load_id_map(
             ),
         ));
     }
-    if version[0] != TVIM_VERSION {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "unsupported TVIM version: {} (this build expects version {})",
-                version[0], TVIM_VERSION,
-            ),
-        ));
-    }
-
-    let (bit_width, dim, n_vectors, packed_codes, scales) = read_core(&mut f)?;
+    let (bit_width, dim, n_vectors, packed_codes, scales, tqplus_shift, tqplus_scale) =
+        read_core_versioned(&mut f, version[0], TVIM_VERSION, ".tvim")?;
 
     let mut slot_to_id = Vec::with_capacity(n_vectors);
     let mut buf = [0u8; 8];
@@ -169,12 +167,16 @@ pub fn load_id_map(
         slot_to_id.push(u64::from_le_bytes(buf));
     }
 
-    Ok((bit_width, dim, n_vectors, packed_codes, scales, slot_to_id))
+    Ok((
+        bit_width, dim, n_vectors, packed_codes, scales, tqplus_shift, tqplus_scale,
+        slot_to_id,
+    ))
 }
 
 const CORE_HEADER_SIZE: usize = 9;
 
-/// Core header + packed codes + per-vector scales — shared by `.tv` and `.tvim`.
+/// Core header + packed codes + per-vector scales + TQ+ calibration —
+/// shared by `.tv` and `.tvim`.
 fn write_core<W: Write>(
     w: &mut W,
     bit_width: usize,
@@ -182,6 +184,8 @@ fn write_core<W: Write>(
     n_vectors: usize,
     packed_codes: &[u8],
     scales: &[f32],
+    tqplus_shift: &[f32],
+    tqplus_scale: &[f32],
 ) -> io::Result<()> {
     w.write_all(&[bit_width as u8])?;
     w.write_all(&(dim as u32).to_le_bytes())?;
@@ -190,13 +194,76 @@ fn write_core<W: Write>(
     for &s in scales {
         w.write_all(&s.to_le_bytes())?;
     }
+    // TQ+ trailer. n_calib == 0 means identity calibration (lazy index
+    // with no add yet, or a loaded pre-TQ+ index that's been resaved);
+    // otherwise must equal dim.
+    assert!(
+        tqplus_shift.len() == tqplus_scale.len()
+            && (tqplus_shift.is_empty() || tqplus_shift.len() == dim),
+        "TQ+ shift/scale must have equal length and either be empty or equal dim"
+    );
+    let n_calib = tqplus_shift.len() as u32;
+    w.write_all(&n_calib.to_le_bytes())?;
+    for &s in tqplus_shift {
+        w.write_all(&s.to_le_bytes())?;
+    }
+    for &s in tqplus_scale {
+        w.write_all(&s.to_le_bytes())?;
+    }
     Ok(())
 }
 
-fn read_core<R: Read>(r: &mut R) -> io::Result<(usize, usize, usize, Vec<u8>, Vec<f32>)> {
+/// Read the core payload, dispatching on the version byte. Knows about
+/// v2 (no TQ+) and v3 (with TQ+); anything else errors.
+fn read_core_versioned<R: Read>(
+    r: &mut R,
+    version: u8,
+    expected: u8,
+    label: &str,
+) -> io::Result<CoreLoad> {
+    match version {
+        2 => read_core_v2(r),
+        3 => read_core_v3(r),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "unsupported {label} format version: {version} (this build \
+                 supports versions 2 and {expected})",
+            ),
+        )),
+    }
+}
+
+/// v2: header + codes + scales. Returns empty TQ+ vectors (identity calibration).
+fn read_core_v2<R: Read>(r: &mut R) -> io::Result<CoreLoad> {
+    let (bit_width, dim, n_vectors, packed_codes, scales) = read_header_codes_scales(r)?;
+    Ok((bit_width, dim, n_vectors, packed_codes, scales, Vec::new(), Vec::new()))
+}
+
+/// v3: header + codes + scales + TQ+ trailer.
+fn read_core_v3<R: Read>(r: &mut R) -> io::Result<CoreLoad> {
+    let (bit_width, dim, n_vectors, packed_codes, scales) = read_header_codes_scales(r)?;
+
+    let mut n_calib_bytes = [0u8; 4];
+    r.read_exact(&mut n_calib_bytes)?;
+    let n_calib = u32::from_le_bytes(n_calib_bytes) as usize;
+    if n_calib != 0 && n_calib != dim {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid TQ+ n_calib {n_calib}: must be 0 or equal to dim {dim}"),
+        ));
+    }
+    let tqplus_shift = read_f32_array(r, n_calib)?;
+    let tqplus_scale = read_f32_array(r, n_calib)?;
+
+    Ok((bit_width, dim, n_vectors, packed_codes, scales, tqplus_shift, tqplus_scale))
+}
+
+fn read_header_codes_scales<R: Read>(
+    r: &mut R,
+) -> io::Result<(usize, usize, usize, Vec<u8>, Vec<f32>)> {
     let mut header = [0u8; CORE_HEADER_SIZE];
     r.read_exact(&mut header)?;
-
     let bit_width = header[0] as usize;
     let dim = u32::from_le_bytes([header[1], header[2], header[3], header[4]]) as usize;
     let n_vectors = u32::from_le_bytes([header[5], header[6], header[7], header[8]]) as usize;
@@ -205,12 +272,15 @@ fn read_core<R: Read>(r: &mut R) -> io::Result<(usize, usize, usize, Vec<u8>, Ve
     let mut packed_codes = vec![0u8; packed_bytes];
     r.read_exact(&mut packed_codes)?;
 
-    let mut scales_bytes = vec![0u8; n_vectors * 4];
-    r.read_exact(&mut scales_bytes)?;
-    let scales: Vec<f32> = scales_bytes
+    let scales = read_f32_array(r, n_vectors)?;
+    Ok((bit_width, dim, n_vectors, packed_codes, scales))
+}
+
+fn read_f32_array<R: Read>(r: &mut R, n: usize) -> io::Result<Vec<f32>> {
+    let mut bytes = vec![0u8; n * 4];
+    r.read_exact(&mut bytes)?;
+    Ok(bytes
         .chunks_exact(4)
         .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-        .collect();
-
-    Ok((bit_width, dim, n_vectors, packed_codes, scales))
+        .collect())
 }

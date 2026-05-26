@@ -275,16 +275,20 @@ impl IdMapIndex {
             self.inner.len(),
             self.inner.packed_codes(),
             self.inner.scales(),
+            self.inner.tqplus_shift(),
+            self.inner.tqplus_scale(),
             &self.slot_to_id,
         )
     }
 
     /// Load a `.tvim` file previously written by [`Self::write`].
     pub fn load(path: impl AsRef<Path>) -> std::io::Result<Self> {
-        let (bit_width, dim, n_vectors, packed_codes, scales, slot_to_id) =
+        let (bit_width, dim, n_vectors, packed_codes, scales, tqplus_shift, tqplus_scale, slot_to_id) =
             io::load_id_map(path)?;
         let dim_opt = if dim == 0 { None } else { Some(dim) };
-        let inner = TurboQuantIndex::from_parts(dim_opt, bit_width, n_vectors, packed_codes, scales);
+        let inner = TurboQuantIndex::from_parts(
+            dim_opt, bit_width, n_vectors, packed_codes, scales, tqplus_shift, tqplus_scale,
+        );
         let id_to_slot: HashMap<u64, usize> = slot_to_id
             .iter()
             .enumerate()

@@ -74,6 +74,16 @@ pub struct TurboQuantIndex {
     packed_codes: Vec<u8>,
     scales: Vec<f32>,
 
+    /// TQ+ per-coord calibration. Both have length `dim` once the first
+    /// add has happened (and the batch had enough samples to fit them);
+    /// empty otherwise. Frozen after the first add — subsequent adds
+    /// reuse them so all vectors in the index live in the same
+    /// calibrated coordinate system. Loaded indexes from pre-TQ+ files
+    /// arrive empty and behave as identity calibration (no recall gain,
+    /// no behaviour change vs the old encoding).
+    tqplus_shift: Vec<f32>,
+    tqplus_scale: Vec<f32>,
+
     // Thread-safe lazy caches. These are initialised from `&self` via
     // `OnceLock::get_or_init`, which allows `search` to take `&self`
     // and run concurrently from multiple threads without external
@@ -129,6 +139,8 @@ impl TurboQuantIndex {
             n_vectors: 0,
             packed_codes: Vec::new(),
             scales: Vec::new(),
+            tqplus_shift: Vec::new(),
+            tqplus_scale: Vec::new(),
             rotation: OnceLock::new(),
             boundaries: OnceLock::new(),
             centroids: OnceLock::new(),
@@ -152,6 +164,8 @@ impl TurboQuantIndex {
             n_vectors: 0,
             packed_codes: Vec::new(),
             scales: Vec::new(),
+            tqplus_shift: Vec::new(),
+            tqplus_scale: Vec::new(),
             rotation: OnceLock::new(),
             boundaries: OnceLock::new(),
             centroids: OnceLock::new(),
@@ -189,7 +203,15 @@ impl TurboQuantIndex {
             .centroids
             .get()
             .expect("centroids cache is initialized");
-        let (packed, scales) = encode::encode(
+        // On subsequent adds, reuse the calibration fitted on the first
+        // batch so all vectors live in the same calibrated coord system.
+        // On the first add, encode() fits a fresh calibration.
+        let existing = if self.tqplus_shift.is_empty() {
+            None
+        } else {
+            Some((self.tqplus_shift.as_slice(), self.tqplus_scale.as_slice()))
+        };
+        let (packed, scales, shift, scale_tq) = encode::encode(
             vectors,
             n,
             dim,
@@ -197,14 +219,18 @@ impl TurboQuantIndex {
             boundaries,
             centroids,
             self.bit_width,
+            existing,
         );
 
         if self.n_vectors == 0 {
             self.packed_codes = packed;
             self.scales = scales;
+            self.tqplus_shift = shift;
+            self.tqplus_scale = scale_tq;
         } else {
             self.packed_codes.extend_from_slice(&packed);
             self.scales.extend_from_slice(&scales);
+            // tqplus_shift/scale unchanged — locked by the first add.
         }
         self.n_vectors += n;
 
@@ -330,6 +356,8 @@ impl TurboQuantIndex {
             &blocked.data,
             centroids,
             &self.scales,
+            &self.tqplus_shift,
+            &self.tqplus_scale,
             self.bit_width,
             dim,
             self.n_vectors,
@@ -385,13 +413,24 @@ impl TurboQuantIndex {
             self.n_vectors,
             &self.packed_codes,
             &self.scales,
+            &self.tqplus_shift,
+            &self.tqplus_scale,
         )
     }
 
     pub fn load(path: impl AsRef<Path>) -> std::io::Result<Self> {
-        let (bit_width, dim, n_vectors, packed_codes, scales) = io::load(path)?;
+        let (bit_width, dim, n_vectors, packed_codes, scales, tqplus_shift, tqplus_scale) =
+            io::load(path)?;
         let dim_opt = if dim == 0 { None } else { Some(dim) };
-        Ok(Self::from_parts(dim_opt, bit_width, n_vectors, packed_codes, scales))
+        Ok(Self::from_parts(
+            dim_opt,
+            bit_width,
+            n_vectors,
+            packed_codes,
+            scales,
+            tqplus_shift,
+            tqplus_scale,
+        ))
     }
 
     pub(crate) fn from_parts(
@@ -400,6 +439,8 @@ impl TurboQuantIndex {
         n_vectors: usize,
         packed_codes: Vec<u8>,
         scales: Vec<f32>,
+        tqplus_shift: Vec<f32>,
+        tqplus_scale: Vec<f32>,
     ) -> Self {
         Self {
             dim,
@@ -407,6 +448,8 @@ impl TurboQuantIndex {
             n_vectors,
             packed_codes,
             scales,
+            tqplus_shift,
+            tqplus_scale,
             rotation: OnceLock::new(),
             boundaries: OnceLock::new(),
             centroids: OnceLock::new(),
@@ -420,6 +463,14 @@ impl TurboQuantIndex {
 
     pub(crate) fn scales(&self) -> &[f32] {
         &self.scales
+    }
+
+    pub(crate) fn tqplus_shift(&self) -> &[f32] {
+        &self.tqplus_shift
+    }
+
+    pub(crate) fn tqplus_scale(&self) -> &[f32] {
+        &self.tqplus_scale
     }
 
     /// Remove the vector at `idx` in O(1) by swapping with the last vector.
