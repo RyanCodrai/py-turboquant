@@ -18,7 +18,6 @@ try:
     from llama_index.core.bridge.pydantic import PrivateAttr
     from llama_index.core.schema import (
         BaseNode,
-        MetadataMode,
         NodeRelationship,
         RelatedNodeInfo,
         TextNode,
@@ -30,7 +29,12 @@ try:
         MetadataFilter,
         MetadataFilters,
         VectorStoreQuery,
+        VectorStoreQueryMode,
         VectorStoreQueryResult,
+    )
+    from llama_index.core.vector_stores.utils import (
+        metadata_dict_to_node,
+        node_to_metadata_dict,
     )
 except ImportError as exc:
     raise ImportError(
@@ -51,9 +55,14 @@ _STORE_EXT = ".nodes.json"
 _NAMESPACE_SEP = "__"
 _DEFAULT_PERSIST_FNAME = "vector_store.json"
 _DEFAULT_VECTOR_STORE = "default"
-# Bump when the nodes.json shape changes; loader refuses to deserialize
-# unknown versions.
-_NODES_SCHEMA_VERSION = 1
+# Bump when the nodes.json shape changes; loader accepts the current
+# version plus any older versions whose missing fields we know how to
+# reconstruct (currently v1, written before full-node round-trip was
+# added — v1 entries are reconstructed as bare TextNodes with only
+# text + metadata + SOURCE relationship, matching the original
+# lossy behaviour rather than failing to load).
+_NODES_SCHEMA_VERSION = 2
+_NODES_SCHEMA_COMPAT = (1, 2)
 
 
 def _split_persist_base(persist_path: str | Path) -> Path:
@@ -160,10 +169,23 @@ class TurboQuantVectorStore(BasePydanticVectorStore):
             nid = node.node_id
             self._node_id_to_u64[nid] = h
             self._u64_to_node_id[h] = nid
+            # `metadata` and `ref_doc_id` are kept at top level for fast
+            # filter / doc-id lookup (queries hit these on every hit;
+            # parsing _node_content per hit would be wasteful). `node_dict`
+            # is the framework's canonical metadata representation
+            # (`_node_content` + `_node_type` + original metadata keys),
+            # which `metadata_dict_to_node` reconstructs into a full
+            # BaseNode — preserving relationships (PREVIOUS / NEXT /
+            # PARENT / CHILD), excluded_*_metadata_keys, template fields,
+            # start/end_char_idx and mimetype on retrieval. The narrow
+            # `{text, metadata, ref_doc_id}` schema we used to keep lost
+            # all of those silently.
             self._nodes[nid] = {
-                "text": node.get_content(metadata_mode=MetadataMode.NONE),
                 "metadata": dict(node.metadata),
                 "ref_doc_id": node.ref_doc_id,
+                "node_dict": node_to_metadata_dict(
+                    node, remove_text=False, flat_metadata=False
+                ),
             }
             ids.append(nid)
         return ids
@@ -254,7 +276,16 @@ class TurboQuantVectorStore(BasePydanticVectorStore):
         return [self._reconstruct_node(nid, data) for nid, data in candidates]
 
     @staticmethod
-    def _reconstruct_node(nid: str, data: dict[str, Any]) -> TextNode:
+    def _reconstruct_node(nid: str, data: dict[str, Any]) -> BaseNode:
+        # v2 entries carry `node_dict` — round-trip via the framework's
+        # own helper so we get the full BaseNode subclass back
+        # (TextNode / IndexNode / ImageNode) with every field populated.
+        if "node_dict" in data:
+            return metadata_dict_to_node(data["node_dict"])
+        # v1 fallback: stores that were persisted before the full-node
+        # round-trip landed only have {text, metadata, ref_doc_id}.
+        # Reconstruct the minimum-fidelity TextNode they used to produce
+        # so old on-disk stores keep loading without manual migration.
         node = TextNode(
             id_=nid,
             text=data["text"],
@@ -329,9 +360,13 @@ class TurboQuantVectorStore(BasePydanticVectorStore):
             return all(results) if results else True
         if condition == FilterCondition.OR:
             return any(results) if results else True
+        if condition == FilterCondition.NOT:
+            # Reference semantics (`build_metadata_filter_fn`,
+            # `utils.py:187-189`): NOT matches when none of the inner
+            # filters match. Empty inner list trivially satisfies NOT.
+            return not any(results)
         raise NotImplementedError(
-            f"filter condition {condition!r} not supported by TurboQuantVectorStore "
-            "(supported: AND, OR)"
+            f"filter condition {condition!r} not supported by TurboQuantVectorStore"
         )
 
     @staticmethod
@@ -369,16 +404,55 @@ class TurboQuantVectorStore(BasePydanticVectorStore):
             return value in target
         if op == FilterOperator.NIN:
             return value not in target
-        if op == FilterOperator.TEXT_MATCH:
-            # Case-insensitive, like the reference impl.
-            return str(target).lower() in str(value).lower()
         if op == FilterOperator.CONTAINS:
             return target in value
+        if op == FilterOperator.TEXT_MATCH:
+            # Reference (`utils.py:138-144`): case-SENSITIVE substring,
+            # both sides must be strings. Previous turbovec impl
+            # lowercased both sides — a silent semantic divergence that
+            # caused our results to disagree with SimpleVectorStore on
+            # mixed-case keys.
+            if isinstance(target, str) and isinstance(value, str):
+                return target in value
+            raise TypeError(
+                "Both metadata value and filter value must be strings "
+                "for the TEXT_MATCH operator"
+            )
+        if op == FilterOperator.TEXT_MATCH_INSENSITIVE:
+            if isinstance(target, str) and isinstance(value, str):
+                return target.lower() in value.lower()
+            raise TypeError(
+                "Both metadata value and filter value must be strings "
+                "for the TEXT_MATCH_INSENSITIVE operator"
+            )
+        if op == FilterOperator.ALL:
+            # Reference (`utils.py:152-153`): every element of `target`
+            # must be present in the metadata value (which is typically
+            # a list — tag-set matching).
+            return all(t in value for t in target)
+        if op == FilterOperator.ANY:
+            return any(t in value for t in target)
         raise NotImplementedError(
             f"filter operator {op!r} not supported by TurboQuantVectorStore"
         )
 
     def query(self, query: VectorStoreQuery, **_: Any) -> VectorStoreQueryResult:
+        # MMR / SVM / LINEAR_REGRESSION / HYBRID etc. all need access to
+        # full-precision vectors (for pairwise diversity, learned scoring,
+        # or sparse-dense fusion). turbovec discards full precision after
+        # quantization, so any non-DEFAULT mode is unsupportable here.
+        # Raise loudly instead of silently treating it as DEFAULT, which
+        # the previous impl did and which let callers think they were
+        # getting e.g. MMR diversity when they were not.
+        if query.mode != VectorStoreQueryMode.DEFAULT:
+            raise NotImplementedError(
+                f"TurboQuantVectorStore does not support query mode "
+                f"{query.mode!r}. Only VectorStoreQueryMode.DEFAULT is "
+                "supported — MMR / SVM / hybrid modes need access to "
+                "full-precision vectors which turbovec discards after "
+                "quantization. Maintain a parallel store with full vectors "
+                "if you need a non-default scoring mode."
+            )
         if query.query_embedding is None:
             raise ValueError(
                 "TurboQuantVectorStore requires a pre-computed query_embedding "
@@ -538,12 +612,16 @@ class TurboQuantVectorStore(BasePydanticVectorStore):
         with open(base.with_suffix(_STORE_EXT)) as f:
             state = json.load(f)
         version = state.get("schema_version", 0)
-        if version != _NODES_SCHEMA_VERSION:
+        if version not in _NODES_SCHEMA_COMPAT:
             raise ValueError(
                 f"{_STORE_EXT.lstrip('.')} has schema version {version}; "
-                f"this turbovec expects version {_NODES_SCHEMA_VERSION}"
+                f"this turbovec accepts versions {list(_NODES_SCHEMA_COMPAT)}"
             )
         store = cls(index=index)
+        # v1 entries lack `node_dict` and reconstruct as narrow TextNodes;
+        # v2 entries carry it and reconstruct with full BaseNode fidelity.
+        # `_reconstruct_node` dispatches on shape, so we just load the
+        # dict as-is.
         store._nodes = state["nodes"]
         # Reconstruct {node_id: int handle} from the list-of-pairs form.
         store._node_id_to_u64 = {nid: int(h) for nid, h in state["node_id_to_u64"]}

@@ -439,7 +439,46 @@ def test_query_ne_filter_treats_missing_key_as_no_match():
     assert result.nodes[0].metadata.get("tier") == "free"
 
 
-def test_query_text_match_is_case_insensitive():
+def test_query_text_match_is_case_sensitive():
+    # Matches the reference (`utils.py:138-144`): TEXT_MATCH is a case-
+    # SENSITIVE substring check. An earlier turbovec impl lowercased both
+    # sides — we no longer do that (TEXT_MATCH_INSENSITIVE is the
+    # opt-in case-folding variant; see below).
+    store = TurboQuantVectorStore.from_params(dim=64, bit_width=4)
+    nodes = [
+        _make_node("a", seed=0, metadata={"title": "The Lord of the Rings"}),
+        _make_node("b", seed=1, metadata={"title": "Lord of Light"}),
+        _make_node("c", seed=2, metadata={"title": "The Hobbit"}),
+    ]
+    store.add(nodes)
+
+    # Case-correct query: matches the two "Lord" titles.
+    filters = MetadataFilters(
+        filters=[
+            MetadataFilter(key="title", value="Lord", operator=FilterOperator.TEXT_MATCH)
+        ]
+    )
+    q = VectorStoreQuery(
+        query_embedding=_unit_vec(0, 64), similarity_top_k=10, filters=filters
+    )
+    titles = {n.metadata["title"] for n in store.query(q).nodes}
+    assert titles == {"The Lord of the Rings", "Lord of Light"}
+
+    # Wrong-case query: no match (used to match under the lowercasing bug).
+    filters = MetadataFilters(
+        filters=[
+            MetadataFilter(key="title", value="LORD", operator=FilterOperator.TEXT_MATCH)
+        ]
+    )
+    q = VectorStoreQuery(
+        query_embedding=_unit_vec(0, 64), similarity_top_k=10, filters=filters
+    )
+    assert store.query(q).nodes == []
+
+
+def test_query_text_match_insensitive_folds_case():
+    # TEXT_MATCH_INSENSITIVE is the explicit opt-in for case-folding,
+    # matching `utils.py:145-151`.
     store = TurboQuantVectorStore.from_params(dim=64, bit_width=4)
     nodes = [
         _make_node("a", seed=0, metadata={"title": "The Lord of the Rings"}),
@@ -449,28 +488,97 @@ def test_query_text_match_is_case_insensitive():
     store.add(nodes)
     filters = MetadataFilters(
         filters=[
-            MetadataFilter(key="title", value="LORD", operator=FilterOperator.TEXT_MATCH)
+            MetadataFilter(
+                key="title",
+                value="LORD",
+                operator=FilterOperator.TEXT_MATCH_INSENSITIVE,
+            )
         ]
     )
     q = VectorStoreQuery(
         query_embedding=_unit_vec(0, 64), similarity_top_k=10, filters=filters
     )
-    result = store.query(q)
-    titles = {n.metadata["title"] for n in result.nodes}
+    titles = {n.metadata["title"] for n in store.query(q).nodes}
     assert titles == {"The Lord of the Rings", "Lord of Light"}
 
 
-def test_query_unsupported_filter_operator_raises():
-    store = _store_with_tiered_nodes()
-    # ANY is intentionally not in our supported list.
+def test_query_text_match_raises_type_error_on_non_string_operands():
+    # Reference rejects non-string operands with a TypeError so the caller
+    # can't silently fall through to string-coerced behaviour.
+    store = TurboQuantVectorStore.from_params(dim=64, bit_width=4)
+    store.add([_make_node("a", seed=0, metadata={"page": 7})])
     filters = MetadataFilters(
-        filters=[MetadataFilter(key="tier", value=["pro"], operator=FilterOperator.ANY)]
+        filters=[
+            MetadataFilter(key="page", value="7", operator=FilterOperator.TEXT_MATCH)
+        ]
     )
     q = VectorStoreQuery(
-        query_embedding=_unit_vec(0, 64), similarity_top_k=3, filters=filters
+        query_embedding=_unit_vec(0, 64), similarity_top_k=1, filters=filters
     )
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(TypeError, match="TEXT_MATCH"):
         store.query(q)
+
+
+def test_query_all_operator_matches_set_subset():
+    store = TurboQuantVectorStore.from_params(dim=64, bit_width=4)
+    nodes = [
+        _make_node("a", seed=0, metadata={"tags": ["python", "rust", "go"]}),
+        _make_node("b", seed=1, metadata={"tags": ["python", "rust"]}),
+        _make_node("c", seed=2, metadata={"tags": ["python"]}),
+    ]
+    store.add(nodes)
+    filters = MetadataFilters(
+        filters=[
+            MetadataFilter(
+                key="tags", value=["python", "rust"], operator=FilterOperator.ALL
+            )
+        ]
+    )
+    q = VectorStoreQuery(
+        query_embedding=_unit_vec(0, 64), similarity_top_k=10, filters=filters
+    )
+    contents = {n.get_content() for n in store.query(q).nodes}
+    assert contents == {"a", "b"}
+
+
+def test_query_any_operator_matches_set_intersection():
+    store = TurboQuantVectorStore.from_params(dim=64, bit_width=4)
+    nodes = [
+        _make_node("a", seed=0, metadata={"tags": ["python"]}),
+        _make_node("b", seed=1, metadata={"tags": ["rust"]}),
+        _make_node("c", seed=2, metadata={"tags": ["go"]}),
+    ]
+    store.add(nodes)
+    filters = MetadataFilters(
+        filters=[
+            MetadataFilter(
+                key="tags", value=["python", "rust"], operator=FilterOperator.ANY
+            )
+        ]
+    )
+    q = VectorStoreQuery(
+        query_embedding=_unit_vec(0, 64), similarity_top_k=10, filters=filters
+    )
+    contents = {n.get_content() for n in store.query(q).nodes}
+    assert contents == {"a", "b"}
+
+
+def test_query_filter_condition_not_negates_inner_match():
+    # Reference (`utils.py:187-189`): NOT matches when NONE of the inner
+    # filters match. With a single inner EQ filter, NOT is just negation.
+    store = _store_with_tiered_nodes()
+    filters = MetadataFilters(
+        filters=[
+            MetadataFilter(key="tier", value="pro", operator=FilterOperator.EQ)
+        ],
+        condition=FilterCondition.NOT,
+    )
+    q = VectorStoreQuery(
+        query_embedding=_unit_vec(0, 64), similarity_top_k=10, filters=filters
+    )
+    tiers = {n.metadata["tier"] for n in store.query(q).nodes}
+    assert "pro" not in tiers
+    assert tiers == {"free", "enterprise"}
 
 
 # ------------------- Tier 1: protocol completeness -----------------------
@@ -698,3 +806,221 @@ def test_storage_context_persist_and_load_roundtrip(tmp_path):
     retriever = index.as_retriever(similarity_top_k=2)
     results = retriever.retrieve("one")
     assert len(results) == 2
+
+
+# ---- Full-node fidelity round-trip (covers the langchain-class bug
+# pattern at the structural level: every field SimpleVectorStore would
+# preserve through write -> query / get_nodes / persist+load must come
+# back populated, not a bare {id, text, metadata} TextNode shell). ----
+
+def _make_rich_node(
+    text: str,
+    seed: int,
+    *,
+    node_id: str | None = None,
+    metadata: dict | None = None,
+    excluded_embed_metadata_keys: list[str] | None = None,
+    excluded_llm_metadata_keys: list[str] | None = None,
+    relationships: dict | None = None,
+    start_char_idx: int | None = None,
+    end_char_idx: int | None = None,
+    metadata_template: str | None = None,
+    metadata_separator: str | None = None,
+    text_template: str | None = None,
+    mimetype: str | None = None,
+) -> TextNode:
+    """A TextNode with every framework field set to a non-default value so
+    we can assert each one survives the write -> retrieve round-trip."""
+    kwargs: dict = {
+        "text": text,
+        "metadata": metadata or {},
+        "embedding": _unit_vec(seed, 64),
+        "excluded_embed_metadata_keys": excluded_embed_metadata_keys or [],
+        "excluded_llm_metadata_keys": excluded_llm_metadata_keys or [],
+        "relationships": relationships or {},
+    }
+    if node_id is not None:
+        kwargs["id_"] = node_id
+    if start_char_idx is not None:
+        kwargs["start_char_idx"] = start_char_idx
+    if end_char_idx is not None:
+        kwargs["end_char_idx"] = end_char_idx
+    if metadata_template is not None:
+        kwargs["metadata_template"] = metadata_template
+    if metadata_separator is not None:
+        kwargs["metadata_separator"] = metadata_separator
+    if text_template is not None:
+        kwargs["text_template"] = text_template
+    if mimetype is not None:
+        kwargs["mimetype"] = mimetype
+    return TextNode(**kwargs)
+
+
+def test_query_returns_node_with_full_field_fidelity():
+    # Every field SimpleVectorStore preserves through query must survive
+    # turbovec's write -> query round-trip. The previous narrow side-car
+    # schema lost relationships (PREVIOUS/NEXT/PARENT/CHILD),
+    # excluded_*_metadata_keys, template fields, char_idx, and mimetype.
+    store = TurboQuantVectorStore.from_params(dim=64, bit_width=4)
+    node = _make_rich_node(
+        "chunk text",
+        seed=1,
+        node_id="node-rich-1",
+        metadata={"page": 7, "section": "intro"},
+        excluded_embed_metadata_keys=["section"],
+        excluded_llm_metadata_keys=["page"],
+        relationships={
+            NodeRelationship.SOURCE: RelatedNodeInfo(node_id="doc-1"),
+            NodeRelationship.PREVIOUS: RelatedNodeInfo(node_id="node-prev"),
+            NodeRelationship.NEXT: RelatedNodeInfo(node_id="node-next"),
+            NodeRelationship.PARENT: RelatedNodeInfo(node_id="node-parent"),
+        },
+        start_char_idx=100,
+        end_char_idx=200,
+        metadata_template="<<{key}::{value}>>",
+        metadata_separator=" | ",
+        text_template="META:{metadata_str}\nBODY:{content}",
+        mimetype="text/markdown",
+    )
+    store.add([node])
+
+    result = store.query(
+        VectorStoreQuery(query_embedding=_unit_vec(1, 64), similarity_top_k=1)
+    )
+    [returned] = result.nodes
+
+    assert returned.node_id == "node-rich-1"
+    assert returned.get_content() == "chunk text"
+    assert returned.metadata == {"page": 7, "section": "intro"}
+    assert returned.excluded_embed_metadata_keys == ["section"]
+    assert returned.excluded_llm_metadata_keys == ["page"]
+    assert returned.start_char_idx == 100
+    assert returned.end_char_idx == 200
+    assert returned.metadata_template == "<<{key}::{value}>>"
+    assert returned.metadata_separator == " | "
+    assert returned.text_template == "META:{metadata_str}\nBODY:{content}"
+    assert returned.mimetype == "text/markdown"
+    # All four relationships should be present, not just SOURCE.
+    assert returned.relationships[NodeRelationship.SOURCE].node_id == "doc-1"
+    assert returned.relationships[NodeRelationship.PREVIOUS].node_id == "node-prev"
+    assert returned.relationships[NodeRelationship.NEXT].node_id == "node-next"
+    assert returned.relationships[NodeRelationship.PARENT].node_id == "node-parent"
+
+
+def test_get_nodes_returns_full_field_fidelity():
+    # Same fidelity contract for get_nodes (not just query).
+    store = TurboQuantVectorStore.from_params(dim=64, bit_width=4)
+    node = _make_rich_node(
+        "chunk",
+        seed=2,
+        node_id="g-1",
+        metadata={"k": "v"},
+        excluded_embed_metadata_keys=["k"],
+        relationships={
+            NodeRelationship.SOURCE: RelatedNodeInfo(node_id="doc"),
+            NodeRelationship.NEXT: RelatedNodeInfo(node_id="g-2"),
+        },
+        start_char_idx=0,
+        end_char_idx=5,
+        mimetype="application/json",
+    )
+    store.add([node])
+
+    [fetched] = store.get_nodes(node_ids=["g-1"])
+    assert fetched.relationships[NodeRelationship.NEXT].node_id == "g-2"
+    assert fetched.excluded_embed_metadata_keys == ["k"]
+    assert fetched.mimetype == "application/json"
+    assert fetched.start_char_idx == 0
+    assert fetched.end_char_idx == 5
+
+
+def test_persist_round_trip_preserves_full_node_fidelity(tmp_path):
+    # Save + load should not be lossier than query — the on-disk schema
+    # must carry the full _node_content blob (v2+).
+    store = TurboQuantVectorStore.from_params(dim=64, bit_width=4)
+    node = _make_rich_node(
+        "persisted chunk",
+        seed=3,
+        node_id="p-1",
+        metadata={"k": "v"},
+        relationships={
+            NodeRelationship.SOURCE: RelatedNodeInfo(node_id="doc"),
+            NodeRelationship.PREVIOUS: RelatedNodeInfo(node_id="p-0"),
+        },
+        excluded_llm_metadata_keys=["k"],
+        text_template="T:{content}",
+    )
+    store.add([node])
+    persist_path = tmp_path / "store.json"
+    store.persist(str(persist_path))
+
+    loaded = TurboQuantVectorStore.from_persist_path(str(persist_path))
+    [restored] = loaded.get_nodes(node_ids=["p-1"])
+    assert restored.relationships[NodeRelationship.PREVIOUS].node_id == "p-0"
+    assert restored.excluded_llm_metadata_keys == ["k"]
+    assert restored.text_template == "T:{content}"
+
+
+def test_persist_v1_schema_still_loads_with_narrow_fidelity(tmp_path):
+    # A nodes.json written by an older turbovec (schema_version=1, narrow
+    # `{text, metadata, ref_doc_id}` per entry) must still load — relationships
+    # other than SOURCE will be missing (the data wasn't there), but the
+    # text + metadata + SOURCE relationship round-trip as they always did.
+    import json
+
+    # Build a v1-shaped side-car by hand. We still need the binary index
+    # file alongside it, so write a v2 store first and overwrite just
+    # the JSON.
+    store = TurboQuantVectorStore.from_params(dim=64, bit_width=4)
+    node = TextNode(
+        id_="v1-node",
+        text="legacy text",
+        metadata={"k": "v"},
+        embedding=_unit_vec(0, 64),
+        relationships={
+            NodeRelationship.SOURCE: RelatedNodeInfo(node_id="legacy-doc"),
+        },
+    )
+    store.add([node])
+    persist_path = tmp_path / "store.json"
+    store.persist(str(persist_path))
+
+    nodes_path = persist_path.with_suffix(".nodes.json")
+    with open(nodes_path) as f:
+        state = json.load(f)
+    state["schema_version"] = 1
+    # Rewrite each entry in the v1 shape: {text, metadata, ref_doc_id} only.
+    state["nodes"] = {
+        nid: {
+            "text": "legacy text",
+            "metadata": {"k": "v"},
+            "ref_doc_id": "legacy-doc",
+        }
+        for nid in state["nodes"]
+    }
+    with open(nodes_path, "w") as f:
+        json.dump(state, f)
+
+    loaded = TurboQuantVectorStore.from_persist_path(str(persist_path))
+    [restored] = loaded.get_nodes(node_ids=["v1-node"])
+    assert restored.get_content() == "legacy text"
+    assert restored.metadata == {"k": "v"}
+    assert restored.ref_doc_id == "legacy-doc"
+
+
+def test_query_rejects_non_default_mode():
+    # MMR / SVM / hybrid all need full-precision vectors which turbovec
+    # discards. Raise loudly instead of silently treating as DEFAULT
+    # (which the previous impl did, masking that the requested mode
+    # wasn't honoured).
+    from llama_index.core.vector_stores.types import VectorStoreQueryMode
+
+    store = TurboQuantVectorStore.from_params(dim=64, bit_width=4)
+    store.add([_make_node("a", seed=0)])
+    q = VectorStoreQuery(
+        query_embedding=_unit_vec(0, 64),
+        similarity_top_k=1,
+        mode=VectorStoreQueryMode.MMR,
+    )
+    with pytest.raises(NotImplementedError, match="query mode"):
+        store.query(q)
