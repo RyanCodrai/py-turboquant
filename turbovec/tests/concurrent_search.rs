@@ -14,7 +14,7 @@
 use std::sync::Arc;
 use std::thread;
 
-use turbovec::TurboQuantIndex;
+use turbovec::{IdMapIndex, TurboQuantIndex};
 
 /// Deterministic pseudo-random vector generator so the tests are
 /// reproducible without pulling an extra dev-dependency.
@@ -189,5 +189,124 @@ fn write_load_preserves_concurrent_search_results() {
             after.indices_for_query(qi),
             "roundtrip changed top-k for query {qi}"
         );
+    }
+}
+
+#[test]
+fn concurrent_search_after_load_is_safe() {
+    // The docstring on the `Concurrent search` section explicitly
+    // mentions `load` as a `prepare()`-skip target. A loaded index
+    // starts with empty OnceLock caches (same shape as a freshly-built
+    // one), so the race window is identical — but no test exercised it.
+    let index = build_index();
+    let tmp = std::env::temp_dir().join(format!(
+        "turbovec_concurrent_after_load_{}.tv",
+        std::process::id()
+    ));
+    index.write(&tmp).expect("write");
+    let loaded = Arc::new(TurboQuantIndex::load(&tmp).expect("load"));
+    let _ = std::fs::remove_file(&tmp);
+
+    let queries = make_vectors(3, loaded.dim(), 0xC0C0_5EE1);
+    let k = 8;
+    let reference: Vec<Vec<i64>> = {
+        let r = loaded.search(&queries, k);
+        (0..r.nq).map(|qi| r.indices_for_query(qi).to_vec()).collect()
+    };
+
+    let n_threads = 16;
+    let mut handles = Vec::with_capacity(n_threads);
+    for _ in 0..n_threads {
+        let idx = Arc::clone(&loaded);
+        let qs = queries.clone();
+        handles.push(thread::spawn(move || {
+            let r = idx.search(&qs, k);
+            (0..r.nq)
+                .map(|qi| r.indices_for_query(qi).to_vec())
+                .collect::<Vec<_>>()
+        }));
+    }
+    for h in handles {
+        let result = h.join().unwrap();
+        assert_eq!(result, reference);
+    }
+}
+
+#[test]
+fn id_map_concurrent_search_is_deterministic_across_threads() {
+    // `IdMapIndex::search` takes `&self` and delegates to the inner
+    // index's `&self` search plus a Vec/HashMap read. Previously zero
+    // test coverage at this layer — pin the contract.
+    let dim = 256;
+    let n = 512;
+    let vectors = make_vectors(n, dim, 0xCAFE_F00D);
+    let ids: Vec<u64> = (0..n as u64).collect();
+    let mut idx = IdMapIndex::new(dim, 4).unwrap();
+    idx.add_with_ids(&vectors, &ids).unwrap();
+    let idx = Arc::new(idx);
+
+    idx.prepare();
+
+    let queries = make_vectors(4, dim, 0xDEAD_BEEF);
+    let k = 10;
+    let (ref_scores, ref_ids) = idx.search(&queries, k);
+
+    let n_threads = 16;
+    let mut handles = Vec::with_capacity(n_threads);
+    for _ in 0..n_threads {
+        let idx = Arc::clone(&idx);
+        let qs = queries.clone();
+        handles.push(thread::spawn(move || idx.search(&qs, k)));
+    }
+    for h in handles {
+        let (s, i) = h.join().unwrap();
+        assert_eq!(s, ref_scores);
+        assert_eq!(i, ref_ids);
+    }
+}
+
+#[test]
+fn concurrent_prepare_races_with_search_safely() {
+    // Several threads call `prepare()` while others run `search()` on
+    // a fresh index. OnceLock guarantees `get_or_init` runs the closure
+    // exactly once; pin that every search observes consistent state.
+    let queries = make_vectors(2, 256, 0xFAB1_E5);
+    let k = 5;
+
+    let reference_index = build_index();
+    reference_index.prepare();
+    let reference: Vec<Vec<i64>> = {
+        let r = reference_index.search(&queries, k);
+        (0..r.nq).map(|qi| r.indices_for_query(qi).to_vec()).collect()
+    };
+
+    // Fresh copy so the lazy-init race actually exists.
+    let race_index = Arc::new(build_index());
+    let n_prep = 4;
+    let n_search = 8;
+    let mut handles = Vec::with_capacity(n_prep + n_search);
+    for _ in 0..n_prep {
+        let idx = Arc::clone(&race_index);
+        handles.push(thread::spawn(move || {
+            idx.prepare();
+            None
+        }));
+    }
+    for _ in 0..n_search {
+        let idx = Arc::clone(&race_index);
+        let qs = queries.clone();
+        handles.push(thread::spawn(move || {
+            let r = idx.search(&qs, k);
+            Some(
+                (0..r.nq)
+                    .map(|qi| r.indices_for_query(qi).to_vec())
+                    .collect::<Vec<_>>(),
+            )
+        }));
+    }
+    for h in handles {
+        if let Some(result) = h.join().unwrap() {
+            assert_eq!(result, reference);
+        }
     }
 }
