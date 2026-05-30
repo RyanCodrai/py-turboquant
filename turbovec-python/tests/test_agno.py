@@ -991,3 +991,100 @@ def test_update_metadata_unknown_content_id_is_noop():
     # Nothing changed on the known doc.
     docs = list(db._u64_to_doc.values())
     assert docs[0]["meta_data"] == {"k": 1}
+
+
+# ---- Tier-2 field-completeness tests. Each pins behaviour around
+# Document fields that are populated, omitted, or diverged from LanceDb.
+# Without these, a refactor could silently change the contract. ----
+
+def test_search_results_content_origin_divergence_from_lancedb():
+    # `Document.content_origin` is an agno field set by some Reader
+    # pipelines. LanceDb drops it on insert (stores `payload` as opaque
+    # JSON of {id, name, meta_data, content_id, usage} only); turbovec
+    # mirrors that. Pin the divergence so a future caller doesn't quietly
+    # start relying on the field surviving — and so a future preservation
+    # change (turbovec preserving it where LanceDb doesn't) is a
+    # deliberate decision.
+    embedder = StubEmbedder(DIM)
+    db = TurboQuantVectorDb(embedder=embedder)
+    db.create()
+    doc = Document(
+        id="d-1",
+        content="hello",
+        embedding=embedder._embed("hello"),
+        content_origin="pdf",
+    )
+    db.insert("h", [doc])
+    [result] = db.search("hello", limit=1)
+    # Matches LanceDb behaviour: content_origin is not preserved.
+    assert result.content_origin is None
+
+
+def test_search_results_size_divergence_from_lancedb():
+    # Same divergence pin for `Document.size`.
+    embedder = StubEmbedder(DIM)
+    db = TurboQuantVectorDb(embedder=embedder)
+    db.create()
+    doc = Document(
+        id="d-1",
+        content="hello",
+        embedding=embedder._embed("hello"),
+        size=42,
+    )
+    db.insert("h", [doc])
+    [result] = db.search("hello", limit=1)
+    assert result.size is None
+
+
+def test_search_results_embedding_is_none_divergence_from_lancedb():
+    # LanceDb's `_build_search_results` sets `embedding=item["vector"]`
+    # so callers can read the original vector off a returned hit.
+    # turbovec quantizes vectors to 2-4 bits per dim and discards the
+    # full-precision form — the original vector is unrecoverable, so
+    # we return `embedding=None`. Pin this so a caller who depends on
+    # `result.embedding` after retrieval (e.g. for rerank-by-similarity)
+    # gets a clear contract from the test suite, not a runtime surprise.
+    embedder = StubEmbedder(DIM)
+    db = TurboQuantVectorDb(embedder=embedder)
+    db.create()
+    db.insert("h", [_doc("a", doc_id="d-1")])
+    [result] = db.search("a", limit=1)
+    assert result.embedding is None
+
+
+def test_reranker_output_documents_carry_reranking_score():
+    # When the reranker sets `reranking_score`, it must survive the
+    # post-rerank result list. Existing reranker tests only check the
+    # order; a refactor that re-threads `embedder` could drop other
+    # fields the reranker mutated.
+    from agno.knowledge.reranker.base import Reranker as _AgnoReranker
+
+    class ScoringReranker(_AgnoReranker):
+        def rerank(self, query: str, documents):
+            for i, d in enumerate(documents):
+                d.reranking_score = float(len(documents) - i)
+            return documents
+
+    embedder = StubEmbedder(DIM)
+    db = TurboQuantVectorDb(embedder=embedder, reranker=ScoringReranker())
+    db.create()
+    db.insert("h", [_doc(f"doc-{i}") for i in range(3)])
+
+    results = db.search("doc-0", limit=3)
+    assert all(r.reranking_score is not None for r in results)
+    assert all(isinstance(r.reranking_score, float) for r in results)
+
+
+def test_delete_by_metadata_returns_false_when_no_match():
+    # `delete_by_*` methods return bool — True when at least one doc
+    # matched (and was deleted), False otherwise. Other delete tests
+    # cover the True branch; this pins the False branch so a regression
+    # always returning True can't silently mask "I expected to delete
+    # something and nothing matched" upstream.
+    embedder = StubEmbedder(DIM)
+    db = TurboQuantVectorDb(embedder=embedder)
+    db.create()
+    db.insert("h", [_doc("a", meta_data={"tag": "x"})])
+    assert db.delete_by_metadata({"tag": "no-such-value"}) is False
+    # Original doc still present.
+    assert db.get_count() == 1
