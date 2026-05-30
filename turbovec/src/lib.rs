@@ -204,12 +204,20 @@ impl TurboQuantIndex {
     }
 
     /// Add a flat batch of vectors. `dim` must be set (either eagerly at
-    /// construction or by a prior [`Self::add_2d`] call). Panics otherwise.
+    /// construction or by a prior [`Self::add_2d`] call).
     ///
-    /// Panics if any coordinate is non-finite (NaN, +Inf, -Inf) or has
-    /// magnitude `>= 1e16`. Callers handling untrusted input should
-    /// prefer [`Self::add_2d`], which returns a typed
-    /// [`AddError::InvalidInputValue`] instead.
+    /// `vectors.len()` must be a multiple of `dim`; an empty input is a
+    /// no-op.
+    ///
+    /// # Panics
+    ///
+    /// - If `dim` is not set (call [`Self::new_lazy`] then [`Self::add_2d`]
+    ///   instead).
+    /// - If `vectors.len()` is not a multiple of `dim`.
+    /// - If any coordinate is non-finite (NaN, +Inf, -Inf) or has
+    ///   magnitude `>= 1e16`. Callers handling untrusted input should
+    ///   prefer [`Self::add_2d`], which returns a typed
+    ///   [`AddError::InvalidInputValue`] instead.
     pub fn add(&mut self, vectors: &[f32]) {
         let dim = self.dim.expect(
             "TurboQuantIndex dim is not set; use add_2d(vectors, dim) on the \
@@ -221,6 +229,17 @@ impl TurboQuantIndex {
             n * dim,
             "vectors length must be a multiple of dim"
         );
+        // Empty add is a true no-op — return before touching calibration
+        // or caches. Previously, an empty first add hit the
+        // `n < TQPLUS_MIN_SAMPLES` branch in `encode`, returned identity
+        // calibration, and locked `tqplus_shift` to that identity for the
+        // lifetime of the index. Every subsequent add — even a million
+        // vectors — then saw `Some(identity)` and silently skipped
+        // fitting fresh calibration. The user lost TQ+ entirely with no
+        // warning.
+        if n == 0 {
+            return;
+        }
         if let Some((vi, ci, v)) = first_invalid_coord(vectors, dim) {
             panic!(
                 "invalid input value at vector {vi}, coord {ci}: {v} \
@@ -290,9 +309,19 @@ impl TurboQuantIndex {
     /// Python binding receiving a 2D numpy array) should use, since a
     /// flat `&[f32]` alone is ambiguous about its shape.
     ///
-    /// Returns [`AddError::DimMismatch`] if `dim` does not match the
-    /// already-locked dim, and [`AddError::DimNotMultipleOf8`] when
-    /// committing a lazy index to a dim that is not a multiple of 8.
+    /// Returns:
+    /// - [`AddError::DimMismatch`] if `dim` does not match the
+    ///   already-locked dim.
+    /// - [`AddError::DimNotMultipleOf8`] when committing a lazy index
+    ///   to a dim that is not a multiple of 8.
+    /// - [`AddError::InvalidInputValue`] if any coordinate is non-finite
+    ///   or has magnitude `>= 1e16`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `vectors.len()` is not a multiple of `dim`. (This
+    /// indicates a caller-side bug rather than recoverable bad data, so
+    /// it isn't returned as a typed error.)
     pub fn add_2d(&mut self, vectors: &[f32], dim: usize) -> Result<(), AddError> {
         match self.dim {
             Some(existing) if existing != dim => {
@@ -336,6 +365,13 @@ impl TurboQuantIndex {
     /// Call [`TurboQuantIndex::prepare`] once after `add`/`load` to
     /// pay that cost up front if you want deterministic first-query
     /// latency.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `queries.len()` is not a multiple of `dim`, or if any
+    /// query coordinate is non-finite (NaN, +Inf, -Inf) or has
+    /// magnitude `>= 1e16`. Validate untrusted input at the caller
+    /// (e.g. the Python binding raises `ValueError`).
     pub fn search(&self, queries: &[f32], k: usize) -> SearchResults {
         self.search_with_mask(queries, k, None)
     }
@@ -348,6 +384,12 @@ impl TurboQuantIndex {
     /// `n_allowed` is the number of `true` entries in `mask`.
     ///
     /// Passing `mask = None` is equivalent to [`Self::search`].
+    ///
+    /// # Panics
+    ///
+    /// - If `mask.len() != self.len()` (when `mask` is `Some`).
+    /// - If `queries.len()` is not a multiple of `dim`.
+    /// - If any query coordinate is non-finite or has magnitude `>= 1e16`.
     pub fn search_with_mask(
         &self,
         queries: &[f32],
@@ -508,6 +550,28 @@ impl TurboQuantIndex {
         tqplus_shift: Vec<f32>,
         tqplus_scale: Vec<f32>,
     ) -> Self {
+        // v2 files (pre-TQ+) load with empty TQ+ vectors and a positive
+        // n_vectors. If we leave `tqplus_shift` empty, the next `add()`
+        // would see `existing = None` (the lazy-first-add signal),
+        // call `encode()` with `existing = None`, get a fresh fitted
+        // calibration back — and then silently drop it because
+        // `n_vectors != 0` takes the else branch that only extends
+        // `packed_codes` / `scales`. The new vectors would be encoded
+        // with that fitted calibration but searched against identity,
+        // producing silently-wrong scores.
+        //
+        // Populate explicit identity here so the "is the calibration
+        // committed?" check always agrees with the actual state of the
+        // stored vectors.
+        let (tqplus_shift, tqplus_scale) = if tqplus_shift.is_empty() && n_vectors > 0 {
+            let d = dim.expect(
+                "from_parts: n_vectors > 0 implies a committed dim — \
+                 mismatch indicates a corrupted side-car or a misuse",
+            );
+            (vec![0.0; d], vec![1.0; d])
+        } else {
+            (tqplus_shift, tqplus_scale)
+        };
         Self {
             dim,
             bit_width,
