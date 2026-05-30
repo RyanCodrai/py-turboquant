@@ -246,6 +246,177 @@ fn load_rejects_wrong_magic() {
 }
 
 #[test]
+fn add_with_ids_2d_rolls_back_id_tables_on_inner_dim_mismatch() {
+    // Regression test for an audit-found bug: `add_with_ids_2d` used to
+    // mutate `id_to_slot` / `slot_to_id` BEFORE calling `inner.add_2d`.
+    // If the inner call returned `Err(DimMismatch)` (e.g. caller passed
+    // wrong dim on a committed-dim index), the ID tables retained `n`
+    // ghost entries pointing at slots that don't exist in the inner
+    // index — subsequent `search_with_allowlist` would read those
+    // ghosts and corrupt further.
+    let dim = 128;
+    let mut idx = IdMapIndex::new(dim, 4).unwrap();
+    let initial = gaussian_normalized(3, dim, 0xA11D_0DE0);
+    idx.add_with_ids_2d(&initial, dim, &[10, 20, 30]).unwrap();
+    assert_eq!(idx.len(), 3);
+
+    // Now try to add with the wrong dim — must return DimMismatch and
+    // leave ID tables untouched.
+    let wrong = gaussian_normalized(2, 64, 0xA11D_0DE1);
+    let err = idx.add_with_ids_2d(&wrong, 64, &[40, 50]).unwrap_err();
+    assert_eq!(
+        err,
+        turbovec::AddError::DimMismatch {
+            existing: dim,
+            got: 64,
+        },
+    );
+
+    // ID tables must be untouched — len is still 3, the ids 40/50 must
+    // NOT be present (the bug would have left them as ghosts).
+    assert_eq!(idx.len(), 3);
+    assert!(!idx.contains(40));
+    assert!(!idx.contains(50));
+    // Original ids still resolve correctly.
+    assert!(idx.contains(10));
+    assert!(idx.contains(20));
+    assert!(idx.contains(30));
+
+    // And a subsequent correctly-dim'd add still works (no leftover
+    // ghost entries blocking the slots or colliding with the new ids).
+    let extra = gaussian_normalized(2, dim, 0xA11D_0DE2);
+    idx.add_with_ids_2d(&extra, dim, &[40, 50]).unwrap();
+    assert_eq!(idx.len(), 5);
+    assert!(idx.contains(40));
+    assert!(idx.contains(50));
+}
+
+
+// ---- IdMapIndex audit-driven coverage ----
+
+#[test]
+fn add_with_ids_2d_rejects_non_multiple_buffer() {
+    // VectorBufferNotMultipleOfDim — reachable only via `add_with_ids_2d`
+    // (the non-2d entry point panics earlier on the same condition).
+    let mut idx = IdMapIndex::new_lazy(4).unwrap();
+    // 17 floats with dim=8 → 17 % 8 != 0.
+    let err = idx
+        .add_with_ids_2d(&vec![0.0f32; 17], 8, &[1, 2])
+        .unwrap_err();
+    assert!(
+        matches!(err, turbovec::AddError::VectorBufferNotMultipleOfDim { .. }),
+        "expected VectorBufferNotMultipleOfDim, got {err:?}",
+    );
+}
+
+#[test]
+fn add_with_ids_2d_rejects_zero_dim() {
+    // Same error variant, dim=0 sub-branch.
+    let mut idx = IdMapIndex::new_lazy(4).unwrap();
+    let err = idx.add_with_ids_2d(&[], 0, &[]).unwrap_err();
+    assert!(
+        matches!(err, turbovec::AddError::VectorBufferNotMultipleOfDim { .. }),
+        "expected VectorBufferNotMultipleOfDim, got {err:?}",
+    );
+}
+
+#[test]
+fn search_returns_descending_scores_aligned_with_ids() {
+    // Pins (1) scores are returned non-empty, (2) length matches ids,
+    // (3) sorted descending — none of which is asserted in the existing
+    // suite. Same #81-shape regression risk.
+    let dim = 128;
+    let data = gaussian_normalized(20, dim, 0xA11D_5001);
+    let mut idx = IdMapIndex::new(dim, 4).unwrap();
+    let ids: Vec<u64> = (0..20).map(|i| i as u64 + 1).collect();
+    idx.add_with_ids(&data, &ids).unwrap();
+
+    let q = &data[0..dim];
+    let (scores, got_ids) = idx.search(q, 5);
+
+    assert_eq!(scores.len(), 5);
+    assert_eq!(scores.len(), got_ids.len());
+    assert!(scores.iter().all(|s| s.is_finite()));
+    for w in scores.windows(2) {
+        assert!(w[0] >= w[1], "scores not in descending order: {scores:?}");
+    }
+}
+
+#[test]
+fn search_multi_query_results_are_row_major() {
+    // The docstring promises row-major flattening: result i's results
+    // live in qi*k..(qi+1)*k. All existing IdMap tests use single
+    // queries; multi-query layout is unverified at this layer.
+    let dim = 128;
+    let data = gaussian_normalized(20, dim, 0xA11D_5002);
+    let mut idx = IdMapIndex::new(dim, 4).unwrap();
+    let ids: Vec<u64> = (0..20).map(|i| i as u64 + 1).collect();
+    idx.add_with_ids(&data, &ids).unwrap();
+
+    // Build two queries: vec0 and vec5. Each should self-match top-1.
+    let k = 3;
+    let mut queries = Vec::with_capacity(2 * dim);
+    queries.extend_from_slice(&data[0..dim]);
+    queries.extend_from_slice(&data[5 * dim..6 * dim]);
+
+    let (scores, got_ids) = idx.search(&queries, k);
+    assert_eq!(scores.len(), 2 * k);
+    assert_eq!(got_ids.len(), 2 * k);
+    // Query 0's results live in indices 0..k; query 1's in k..2k.
+    assert_eq!(got_ids[0], ids[0], "query 0 top-1 should be id of vec 0");
+    assert_eq!(got_ids[k], ids[5], "query 1 top-1 should be id of vec 5");
+}
+
+#[test]
+fn remove_keeps_swapped_id_addressable_in_both_tables() {
+    // After remove(target), the id that was at the last slot moves into
+    // target's slot. Pin that the moved id is still reachable via search
+    // AND via `contains` — i.e. both `slot_to_id` and `id_to_slot`
+    // stayed consistent. A bug updating only one table could mask
+    // itself in self-query and only show up here.
+    let dim = 128;
+    let data = gaussian_normalized(5, dim, 0xA11D_5003);
+    let mut idx = IdMapIndex::new(dim, 4).unwrap();
+    let ids = [101u64, 202, 303, 404, 505];
+    idx.add_with_ids(&data, &ids).unwrap();
+
+    // Remove the second slot; the last slot's id (505) swaps into slot 1.
+    assert!(idx.remove(202));
+
+    // Both tables must reflect the swap: contains() and search() agree.
+    assert!(idx.contains(505));
+    let q = &data[4 * dim..5 * dim];  // the vector that used to be at slot 4
+    let (_, got_ids) = idx.search(q, 1);
+    assert_eq!(got_ids[0], 505);
+    // The moved id is now at slot 1, and the original slot-1 vector
+    // (id=202) is gone.
+    assert!(!idx.contains(202));
+}
+
+#[test]
+fn prepare_does_not_change_search_results() {
+    // `prepare` is documented as eagerly populating caches; calling it
+    // before search must not change the result.
+    let dim = 128;
+    let data = gaussian_normalized(10, dim, 0xA11D_5004);
+    let mut idx = IdMapIndex::new(dim, 4).unwrap();
+    let ids: Vec<u64> = (0..10).collect();
+    idx.add_with_ids(&data, &ids).unwrap();
+
+    let q = &data[3 * dim..4 * dim];
+    let (s_before, ids_before) = idx.search(q, 5);
+
+    // Fresh index, same data, but prepare() first.
+    let mut idx2 = IdMapIndex::new(dim, 4).unwrap();
+    idx2.add_with_ids(&data, &ids).unwrap();
+    idx2.prepare();
+    let (s_after, ids_after) = idx2.search(q, 5);
+
+    assert_eq!(ids_before, ids_after);
+    assert_eq!(s_before, s_after);
+}
+
+#[test]
 fn empty_index_round_trip() {
     let dim = 128;
     let idx = IdMapIndex::new(dim, 4).unwrap();
