@@ -119,6 +119,63 @@ fn search_on_lazy_uncommitted_returns_empty() {
     assert_eq!(res.scores.len(), 0);
     assert_eq!(res.indices.len(), 0);
     assert_eq!(res.k, 0);
+    // nq is the only `SearchResults` field not pinned elsewhere in this
+    // suite for the lazy-uncommitted path; explicitly assert it.
+    assert_eq!(res.nq, 0);
+}
+
+#[test]
+fn search_single_query_sets_nq_to_one() {
+    // SearchResults.nq is only asserted in multi-query tests; a
+    // regression that dropped nq to 0 in the single-query path would
+    // not have failed any existing test.
+    let dim = 128;
+    let mut idx = TurboQuantIndex::new(dim, 4).unwrap();
+    let data = unit_vectors(5, dim, 0xA00D_00A0);
+    idx.add(&data);
+
+    let q = &data[0..dim];
+    let res = idx.search(q, 3);
+    assert_eq!(res.nq, 1);
+    assert_eq!(res.k, 3);
+    assert_eq!(res.scores.len(), 3);
+    assert_eq!(res.indices.len(), 3);
+}
+
+#[test]
+fn is_empty_tracks_len() {
+    // Pins `is_empty()` against `len()`. No existing test calls
+    // `is_empty()` on a TurboQuantIndex, so a regression flipping its
+    // polarity (`self.n_vectors > 0`) would compile and pass the suite.
+    let dim = 64;
+    let mut idx = TurboQuantIndex::new(dim, 4).unwrap();
+    assert!(idx.is_empty());
+    assert_eq!(idx.len(), 0);
+
+    let data = unit_vectors(3, dim, 0xA00D_00A1);
+    idx.add(&data);
+    assert!(!idx.is_empty());
+    assert_eq!(idx.len(), 3);
+
+    // After swap_remove down to zero.
+    idx.swap_remove(0);
+    idx.swap_remove(0);
+    idx.swap_remove(0);
+    assert!(idx.is_empty());
+    assert_eq!(idx.len(), 0);
+}
+
+#[test]
+fn add_2d_rejects_non_multiple_of_8_dim_on_lazy_index() {
+    // The `DimNotMultipleOf8` AddError variant is only reachable from a
+    // lazy index whose first `add_2d` commits a non-multiple-of-8 dim.
+    // Previously untested — a regression flipping the branch to Ok or
+    // DimMismatch would not have failed the suite.
+    let mut idx = TurboQuantIndex::new_lazy(4).unwrap();
+    let err = idx.add_2d(&[0.0f32; 14], 7).unwrap_err();
+    assert_eq!(err, turbovec::AddError::DimNotMultipleOf8(7));
+    // Failure must not have committed a dim.
+    assert_eq!(idx.dim_opt(), None);
 }
 
 #[test]
