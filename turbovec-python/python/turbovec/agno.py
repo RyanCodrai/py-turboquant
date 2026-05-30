@@ -495,6 +495,12 @@ class TurboQuantVectorDb(VectorDb):
         limit: int = 5,
         filters: Optional[Union[Dict[str, Any], List[Any]]] = None,
     ) -> List[Document]:
+        # An empty query string usually indicates an upstream bug
+        # (uninitialised variable, failed prompt construction). LanceDb
+        # short-circuits this to [] rather than searching with a hash-
+        # derived embedding of "", which would return arbitrary garbage.
+        if not query:
+            return []
         if self._index is None or len(self._index) == 0:
             return []
 
@@ -529,6 +535,8 @@ class TurboQuantVectorDb(VectorDb):
         limit: int = 5,
         filters: Optional[Union[Dict[str, Any], List[Any]]] = None,
     ) -> List[Document]:
+        if not query:
+            return []
         if self._index is None or len(self._index) == 0:
             return []
 

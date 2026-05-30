@@ -123,6 +123,139 @@ def test_async_search_results_also_carry_embedder():
     asyncio.run(_async_search_embedder_body())
 
 
+# ---- Reference-parity tests against agno's LanceDb test suite. Each
+# pins behaviour the in-tree LanceDb unit tests exercise. ----
+
+def test_update_metadata_updates_all_docs_sharing_content_id():
+    # `content_id` is intentionally many-to-one — `update_metadata(cid, m)`
+    # must update every doc with that cid, not just the first match. The
+    # LanceDb reference covers this; our existing test only inserts one
+    # doc per content_id and wouldn't have caught a "first-match only" bug.
+    # Identify docs by a `label` in meta_data since agno's _derive_doc_id
+    # rewrites doc.id at insert time.
+    embedder = StubEmbedder(DIM)
+    db = TurboQuantVectorDb(embedder=embedder)
+    db.create()
+    db.insert("h", [
+        _doc("a", content_id="shared", meta_data={"label": "first"}),
+        _doc("b", content_id="shared", meta_data={"label": "second"}),
+        _doc("c", content_id="other", meta_data={"label": "third"}),
+    ])
+    db.update_metadata("shared", {"updated": True})
+
+    results = db.search("a", limit=10)
+    by_label = {d.meta_data["label"]: d for d in results}
+    assert by_label["first"].meta_data.get("updated") is True
+    assert by_label["second"].meta_data.get("updated") is True
+    assert by_label["third"].meta_data.get("updated") is None
+
+
+def test_update_metadata_preserves_quantized_codes():
+    # `update_metadata` must not re-derive codes — codes are precious
+    # (cost an embed + a quantise) and a silent re-embed would also
+    # break determinism. Behaviour-level check: search results are
+    # bit-identical before and after a metadata update.
+    embedder = StubEmbedder(DIM)
+    db = TurboQuantVectorDb(embedder=embedder)
+    db.create()
+    db.insert("h", [
+        _doc(f"doc-{i}", doc_id=f"d-{i}", content_id=f"cid-{i}") for i in range(3)
+    ])
+
+    before = db.search("doc-0", limit=3)
+    db.update_metadata("cid-0", {"updated": True})
+    after = db.search("doc-0", limit=3)
+    assert [d.id for d in before] == [d.id for d in after]
+
+
+def test_insert_reembeds_document_with_empty_list_embedding():
+    # In agno's async pipeline, failed embeds surface as `embedding=[]`
+    # (an empty list, distinct path from None). The integration must
+    # re-embed those rather than silently skipping or shipping the
+    # zero-length vector to the kernel. Uses BatchEmbedder so we have
+    # an embedder with the batch path the re-embed code prefers.
+    embedder = BatchEmbedder(DIM)
+    db = TurboQuantVectorDb(embedder=embedder)
+    db.create()
+    doc = Document(id="d-1", content="hello", embedding=[], meta_data={})
+    db.insert("h", [doc])
+    assert db.get_count() == 1
+
+
+def test_insert_empty_document_list_is_noop():
+    # Drop-in safety: callers passing an empty list (e.g. a Knowledge
+    # batch where every doc was filtered out upstream) must not raise
+    # and must not change store state.
+    embedder = StubEmbedder(DIM)
+    db = TurboQuantVectorDb(embedder=embedder)
+    db.create()
+    db.insert("h", [])
+    assert db.get_count() == 0
+
+
+def test_search_with_empty_query_returns_empty():
+    # LanceDb short-circuits `search("")` to []. Without this, a hash-
+    # derived embedding of "" would return arbitrary near-match garbage.
+    embedder = StubEmbedder(DIM)
+    db = TurboQuantVectorDb(embedder=embedder)
+    db.create()
+    db.insert("h", [_doc("a", doc_id="d-1")])
+    assert db.search("", limit=5) == []
+    # None also short-circuits (defensive against upstream un-init).
+    assert db.search(None, limit=5) == []  # type: ignore[arg-type]
+
+
+def test_delete_by_metadata_handles_non_string_values():
+    # `delete_by_metadata` matches on equality across heterogeneous
+    # value types — bools, floats, ints. JSON round-trip during persist
+    # could coerce types (`True` → `"true"`); the in-memory path must
+    # at minimum work natively. Identify docs by `label` since agno's
+    # _derive_doc_id rewrites doc.id at insert time.
+    embedder = StubEmbedder(DIM)
+    db = TurboQuantVectorDb(embedder=embedder)
+    db.create()
+    db.insert("h", [
+        _doc("a", meta_data={"active": True, "score": 0.9, "label": "x"}),
+        _doc("b", meta_data={"active": False, "score": 0.9, "label": "y"}),
+        _doc("c", meta_data={"active": True, "score": 0.5, "label": "z"}),
+    ])
+    db.delete_by_metadata({"active": True})
+    labels = {d.meta_data["label"] for d in db.search("a", limit=10)}
+    assert labels == {"y"}
+
+
+def test_update_metadata_with_empty_dict_is_noop():
+    # `update_metadata(cid, {})` must not raise and must not strip the
+    # existing metadata — empty dict is a real edge case (e.g. a caller
+    # built `metadata` from filtered keys and ended up with no updates).
+    embedder = StubEmbedder(DIM)
+    db = TurboQuantVectorDb(embedder=embedder)
+    db.create()
+    db.insert("h", [_doc("a", doc_id="d-1", content_id="cid-1", meta_data={"k": "v"})])
+    db.update_metadata("cid-1", {})
+
+    results = db.search("a", limit=1)
+    assert results[0].meta_data == {"k": "v"}
+
+
+def test_search_does_not_dedupe_distinct_documents_with_identical_content():
+    # LanceDb dedupes search results by content string; turbovec
+    # intentionally does NOT — each insert produces a distinct quantized
+    # vector + id, and we return both as separate hits so callers can
+    # tell them apart via content_id. Pin this deliberate divergence so
+    # a future refactor doesn't silently start matching LanceDb.
+    embedder = StubEmbedder(DIM)
+    db = TurboQuantVectorDb(embedder=embedder)
+    db.create()
+    db.insert("h", [
+        _doc("identical text", content_id="cid-1"),
+        _doc("identical text", content_id="cid-2"),
+    ])
+    results = db.search("identical text", limit=10)
+    assert len(results) == 2
+    assert {d.content_id for d in results} == {"cid-1", "cid-2"}
+
+
 def test_constructor_requires_embedder():
     with pytest.raises(ValueError, match="embedder.*required"):
         TurboQuantVectorDb()
