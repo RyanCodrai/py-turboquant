@@ -181,3 +181,31 @@ def test_add_with_ids_rejects_nan_with_value_error():
     data[0, 5] = np.nan
     with pytest.raises(ValueError, match="invalid input value"):
         idx.add_with_ids(data, np.array([1], dtype=np.uint64))
+
+
+def test_search_empty_queries_dedups_allowlist_for_effective_k():
+    # Wave-6 fix for a bug introduced in wave-5: the `effective_k`
+    # computation for `nq == 0` counted the raw allowlist length, but
+    # the kernel dedups the allowlist via a packed-bool mask for
+    # `nq > 0`. So `allowlist=[1, 1, 1]` returned shape `(0, 3)` for
+    # empty queries but `(N, 1)` for non-empty — silent divergence.
+    idx = IdMapIndex(dim=64, bit_width=4)
+    idx.add_with_ids(
+        unit_vectors(3, 64),
+        np.array([10, 20, 30], dtype=np.uint64),
+    )
+
+    # Allowlist with three copies of the same id. Effective n_allowed
+    # is 1 (after dedup), not 3.
+    allowlist_with_dupes = np.array([10, 10, 10], dtype=np.uint64)
+    empty_queries = np.empty((0, 64), dtype=np.float32)
+    real_query = unit_vectors(1, 64)
+
+    _, empty_ids = idx.search(empty_queries, k=5, allowlist=allowlist_with_dupes)
+    _, real_ids = idx.search(real_query, k=5, allowlist=allowlist_with_dupes)
+
+    # Both should have effective_k = 1 (only one unique id in the
+    # allowlist), differing only in the leading dimension.
+    assert empty_ids.shape[1] == real_ids.shape[1]
+    assert empty_ids.shape == (0, 1)
+    assert real_ids.shape == (1, 1)

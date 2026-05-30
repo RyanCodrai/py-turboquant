@@ -283,11 +283,20 @@ impl IdMapIndex {
 
         let (scores, ids) = self.inner.search_with_allowlist(q_slice, k, allow_slice);
         // For empty queries (nq=0), match TurboQuantIndex's shape
-        // contract: effective_k is `min(k, n_vectors, n_allowed)`, not
-        // raw `k`. Previously these two index types returned divergent
-        // shapes for the same `k` on the same data.
+        // contract: effective_k is `min(k, n_vectors, n_allowed)`. The
+        // kernel dedups the allowlist via a packed bool mask for nq>0,
+        // so we have to dedup here too — otherwise `allowlist=[1, 1, 1]`
+        // returns shape `(0, 3)` for empty queries but `(N, 1)` for
+        // non-empty queries, a silent shape divergence.
         let effective_k = if nq == 0 {
-            let n_allowed = allow_slice.map_or(self.inner.len(), |s| s.len());
+            let n_allowed = match allow_slice {
+                Some(s) => {
+                    let mut seen: std::collections::HashSet<u64> =
+                        std::collections::HashSet::with_capacity(s.len());
+                    s.iter().filter(|id| seen.insert(**id)).count()
+                }
+                None => self.inner.len(),
+            };
             k.min(self.inner.len()).min(n_allowed)
         } else {
             scores.len() / nq
