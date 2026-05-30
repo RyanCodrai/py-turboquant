@@ -88,6 +88,110 @@ def test_similarity_search_callable_filter_receives_document_id():
     assert {r.id for r in results} == {"keep-1", "keep-2"}
 
 
+# ---- Reference-parity tests against InMemoryVectorStore. Each pins a
+# behaviour the langchain-core in-tree suite tests; the bug class is
+# "drop-in regression that only shows up when users compare against
+# InMemoryVectorStore". ----
+
+def test_async_methods_await_aembed_functions():
+    # If our async paths silently fall back to sync embedding, callers
+    # with a real async embedder (e.g. OpenAI async client) end up
+    # blocking the event loop. AsyncMock makes the side-effect visible:
+    # if aembed_documents / aembed_query weren't awaited, await_count
+    # stays zero.
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    class AsyncStub(StubEmbeddings):
+        def __init__(self, dim: int = 64) -> None:
+            super().__init__(dim)
+            self.aembed_documents = AsyncMock(
+                side_effect=lambda texts: [self._embed(t) for t in texts]
+            )
+            self.aembed_query = AsyncMock(
+                side_effect=lambda text: self._embed(text)
+            )
+
+    emb = AsyncStub(dim=64)
+    store = TurboQuantVectorStore(embedding=emb)
+
+    async def run() -> None:
+        await store.aadd_texts(["a", "b"])
+        await store.asimilarity_search("a", k=1)
+
+    asyncio.run(run())
+
+    assert emb.aembed_documents.await_count >= 1
+    assert emb.aembed_query.await_count >= 1
+
+
+def test_add_documents_upsert_replaces_metadata():
+    # Re-adding a Document with the same id and new metadata must let
+    # the new metadata win — not silently retain the old one. Reference
+    # `InMemoryVectorStore.add_documents` overwrites on duplicate id.
+    emb = StubEmbeddings(dim=64)
+    store = TurboQuantVectorStore.from_texts([], emb, bit_width=4)
+    store.add_documents([Document(id="x", page_content="v1", metadata={"tag": "old"})])
+    store.add_documents([Document(id="x", page_content="v2", metadata={"tag": "new"})])
+
+    [doc] = store.get_by_ids(["x"])
+    assert doc.metadata == {"tag": "new"}
+    assert doc.page_content == "v2"
+
+
+def test_add_documents_does_not_mutate_inputs():
+    # Caller-passed Documents must not be mutated by add_documents — no
+    # in-place .id assignment, no metadata mutation. Reference behaviour;
+    # easy regression target when refactoring the add path.
+    emb = StubEmbeddings(dim=64)
+    store = TurboQuantVectorStore.from_texts([], emb, bit_width=4)
+    docs = [
+        Document(page_content="a", metadata={"k": 1}),
+        Document(id="explicit", page_content="b", metadata={"k": 2}),
+    ]
+    original_meta_ids = [id(d.metadata) for d in docs]
+    store.add_documents(docs)
+
+    assert docs[0].id is None
+    assert docs[1].id == "explicit"
+    assert docs[0].metadata == {"k": 1}
+    assert docs[1].metadata == {"k": 2}
+    # Same dict objects — we didn't replace caller-provided metadata dicts.
+    assert [id(d.metadata) for d in docs] == original_meta_ids
+
+
+def test_add_documents_with_ids_is_idempotent():
+    # Re-running ingestion on an unchanged corpus must not accrete
+    # duplicates. Reference upserts on same id; size stays constant.
+    emb = StubEmbeddings(dim=64)
+    store = TurboQuantVectorStore.from_texts([], emb, bit_width=4)
+    docs = [
+        Document(id="a", page_content="hello"),
+        Document(id="b", page_content="world"),
+    ]
+    store.add_documents(docs)
+    store.add_documents(docs)
+
+    assert len(store._docs) == 2
+    assert set(store._docs.keys()) == {"a", "b"}
+
+
+def test_get_by_ids_empty_input_and_order_preserved():
+    # Two contract points the reference makes that our existing tests
+    # don't pin: (1) empty input returns [] without erroring; (2) output
+    # is in the order of input ids so callers can zip with parallel
+    # arrays (e.g. scores from a separate retriever).
+    emb = StubEmbeddings(dim=64)
+    store = TurboQuantVectorStore.from_texts(
+        ["a", "b", "c"], emb, bit_width=4, ids=["id-a", "id-b", "id-c"]
+    )
+
+    assert store.get_by_ids([]) == []
+
+    docs = store.get_by_ids(["id-c", "id-a", "id-b"])
+    assert [d.id for d in docs] == ["id-c", "id-a", "id-b"]
+
+
 def test_similarity_search_with_dict_filter():
     emb = StubEmbeddings(dim=64)
     store = TurboQuantVectorStore.from_texts(
