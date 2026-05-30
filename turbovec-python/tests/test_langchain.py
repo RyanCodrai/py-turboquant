@@ -645,3 +645,70 @@ def test_dump_and_load_empty_store(tmp_path):
     assert loaded.similarity_search("anything", k=1) == []
     loaded.add_texts(["new"])
     assert loaded._index.dim == 64
+
+
+# ---- Tier-2 field-completeness tests. Each pins a value that a future
+# refactor could silently drop (the #81 family: populated but
+# unasserted). ----
+
+def test_similarity_search_with_score_returns_descending_scores_and_self_match():
+    # Pins the actual semantics of the float in (Document, float) — that
+    # it's a real similarity score, that the self-match wins, and that
+    # results are monotonically non-increasing. Without this, the tuple
+    # position 1 could silently regress to a constant or get swapped
+    # with `handle` and only `isinstance(score, float)` would still pass.
+    emb = StubEmbeddings(dim=64)
+    store = TurboQuantVectorStore.from_texts(
+        ["alpha", "beta", "gamma"], emb, bit_width=4
+    )
+    scored = store.similarity_search_with_score("alpha", k=3)
+    assert scored[0][0].page_content == "alpha"
+    scores = [s for _, s in scored]
+    assert all(a >= b for a, b in zip(scores, scores[1:]))
+
+
+def test_load_then_add_assigns_fresh_handles_without_collision(tmp_path):
+    # `_next_u64` is persisted across dump/load; if it were silently
+    # dropped (back to 0 on load), a fresh add would reuse a handle
+    # that's still mapped to an old doc, corrupting search results.
+    emb = StubEmbeddings(dim=64)
+    store = TurboQuantVectorStore.from_texts(
+        ["a", "b", "c"], emb, bit_width=4, ids=["id-a", "id-b", "id-c"]
+    )
+    store.dump(tmp_path)
+    loaded = TurboQuantVectorStore.load(tmp_path, emb)
+    loaded.add_texts(["d"], ids=["id-d"])
+
+    # All four ids reachable; all four handles distinct.
+    docs = loaded.get_by_ids(["id-a", "id-b", "id-c", "id-d"])
+    assert [d.id for d in docs] == ["id-a", "id-b", "id-c", "id-d"]
+    handles = list(loaded._str_to_u64.values())
+    assert len(set(handles)) == len(handles)
+
+
+def test_embeddings_property_returns_supplied_embedder():
+    # Pins the `embeddings` property override. A refactor dropping it
+    # would silently make the base class return None, breaking
+    # `similarity_search_with_relevance_scores` discovery and some
+    # retriever wiring.
+    emb = StubEmbeddings(dim=64)
+    store = TurboQuantVectorStore(emb)
+    assert store.embeddings is emb
+
+
+def test_aget_by_ids_preserves_order_and_returns_documents_with_id():
+    # Async mirror of `test_get_by_ids_empty_input_and_order_preserved`.
+    import asyncio
+
+    emb = StubEmbeddings(dim=64)
+    store = TurboQuantVectorStore.from_texts(
+        ["a", "b", "c"], emb, bit_width=4, ids=["id-a", "id-b", "id-c"]
+    )
+
+    async def run() -> list[Document]:
+        empty = await store.aget_by_ids([])
+        assert empty == []
+        return await store.aget_by_ids(["id-c", "id-a", "id-b"])
+
+    docs = asyncio.run(run())
+    assert [d.id for d in docs] == ["id-c", "id-a", "id-b"]
