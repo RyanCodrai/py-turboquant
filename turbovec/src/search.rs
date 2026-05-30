@@ -1334,6 +1334,88 @@ pub(crate) fn block_pair_has_allowed(mask: Option<&[u64]>, base_vec_pair: usize)
     }
 }
 
+/// Per-query scalar scoring writing into caller-provided heap arrays.
+/// Used by the non-x86_64 / non-aarch64 scalar fallback at the bottom
+/// of `search`, AND as the x86_64 fallback inside the SIMD-dispatch
+/// `unsafe` block when neither AVX-512 BW nor AVX2 is detected at
+/// runtime (e.g. running a turbovec binary built without the cargo
+/// config's `target-cpu=x86-64-v3` on a pre-Haswell CPU, or under a
+/// VM / emulator that doesn't expose AVX2 to userspace). Without this
+/// fallback, pre-AVX2 x86_64 silently returned empty top-k results
+/// instead of falling back to a slower-but-correct kernel.
+#[allow(clippy::too_many_arguments)]
+fn score_query_into_heap(
+    qlut_uint8: &[u8],
+    qlut_scale: f32,
+    qlut_bias: f32,
+    blocked_codes: &[u8],
+    vec_scales: &[f32],
+    n_byte_groups: usize,
+    n_vectors: usize,
+    n_blocks: usize,
+    mask: Option<&[u64]>,
+    k: usize,
+    heap_s: &mut [f32],
+    heap_i: &mut [u32],
+    heap_sz: &mut usize,
+    heap_min: &mut f32,
+    heap_mi: &mut usize,
+) {
+    for b in 0..n_blocks {
+        let base_vec = b * BLOCK;
+        if !block_has_allowed(mask, base_vec) {
+            continue;
+        }
+        let block_offset = b * n_byte_groups * BLOCK;
+        for lane in 0..BLOCK {
+            let vi = base_vec + lane;
+            if vi >= n_vectors {
+                break;
+            }
+            if let Some(m) = mask {
+                if !mask_allows(m, vi) {
+                    continue;
+                }
+            }
+            let mut score = qlut_bias;
+            for g in 0..n_byte_groups {
+                let byte_val = blocked_codes[block_offset + g * BLOCK + lane] as usize;
+                let hi = byte_val >> 4;
+                let lo = byte_val & 0x0F;
+                score += qlut_scale * qlut_uint8[g * 32 + hi] as f32;
+                score += qlut_scale * qlut_uint8[g * 32 + 16 + lo] as f32;
+            }
+            score *= vec_scales[vi];
+            if *heap_sz < k {
+                heap_s[*heap_sz] = score;
+                heap_i[*heap_sz] = vi as u32;
+                *heap_sz += 1;
+                if *heap_sz == k {
+                    *heap_min = heap_s[0];
+                    *heap_mi = 0;
+                    for h in 1..k {
+                        if heap_s[h] < *heap_min {
+                            *heap_min = heap_s[h];
+                            *heap_mi = h;
+                        }
+                    }
+                }
+            } else if score > *heap_min {
+                heap_s[*heap_mi] = score;
+                heap_i[*heap_mi] = vi as u32;
+                *heap_min = heap_s[0];
+                *heap_mi = 0;
+                for h in 1..k {
+                    if heap_s[h] < *heap_min {
+                        *heap_min = heap_s[h];
+                        *heap_mi = h;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Apply TQ+ per-coord (shift, scale) calibration to a batch of rotated
 /// queries. Returns the calibrated queries and a per-query bias correction
 /// (the search kernel folds this into the per-query bias). When the index
@@ -1639,6 +1721,32 @@ pub fn search(
                             &mut heap_scores, &mut heap_indices,
                             &mut heap_sizes, &mut heap_mins, &mut heap_min_idxs,
                         );
+                    } else {
+                        // Neither AVX-512 BW nor AVX2 detected at runtime on
+                        // this x86_64 CPU. Previously this fell through to
+                        // an empty `unsafe { }` block and `heap_sizes` stayed
+                        // at 0 — `search` then returned empty top-k results
+                        // for every query with no error signal. Fall back to
+                        // per-query scalar scoring instead.
+                        for qo in 0..batch_nq {
+                            score_query_into_heap(
+                                lut_refs[qo],
+                                scale_vals[qo],
+                                bias_vals[qo],
+                                blocked_codes,
+                                vec_scales,
+                                n_byte_groups,
+                                n_vectors,
+                                n_blocks,
+                                mask,
+                                k,
+                                &mut heap_scores[qo],
+                                &mut heap_indices[qo],
+                                &mut heap_sizes[qo],
+                                &mut heap_mins[qo],
+                                &mut heap_min_idxs[qo],
+                            );
+                        }
                     }
                 }
 
@@ -1662,7 +1770,7 @@ pub fn search(
 
     #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     let results = {
-        // Scalar fallback for other architectures
+        // Scalar fallback for architectures without a SIMD kernel.
         let results: Vec<(Vec<f32>, Vec<i64>)> = (0..nq)
             .into_par_iter()
             .map(|qi| {
@@ -1672,43 +1780,23 @@ pub fn search(
                 let mut heap_sz = 0usize;
                 let mut heap_min = f32::NEG_INFINITY;
                 let mut heap_mi = 0usize;
-
-                for b in 0..n_blocks {
-                    let base_vec = b * BLOCK;
-                    if !block_has_allowed(mask, base_vec) {
-                        continue;
-                    }
-                    let block_offset = b * n_byte_groups * BLOCK;
-                    for lane in 0..BLOCK {
-                        let vi = base_vec + lane;
-                        if vi >= n_vectors { break; }
-                        if let Some(m) = mask {
-                            if !mask_allows(m, vi) { continue; }
-                        }
-                        // Total bias is applied once; per-sub-table zero-points
-                        // are already folded into qlut.bias at LUT build time.
-                        let mut score = qlut.bias;
-                        for g in 0..n_byte_groups {
-                            let byte_val = blocked_codes[block_offset + g * BLOCK + lane] as usize;
-                            let hi = byte_val >> 4;
-                            let lo = byte_val & 0x0F;
-                            score += qlut.scale * qlut.uint8_luts[g * 32 + hi] as f32;
-                            score += qlut.scale * qlut.uint8_luts[g * 32 + 16 + lo] as f32;
-                        }
-                        score *= vec_scales[vi];
-                        if heap_sz < k {
-                            heap_s[heap_sz] = score; heap_i[heap_sz] = vi as u32; heap_sz += 1;
-                            if heap_sz == k {
-                                heap_min = heap_s[0]; heap_mi = 0;
-                                for h in 1..k { if heap_s[h] < heap_min { heap_min = heap_s[h]; heap_mi = h; } }
-                            }
-                        } else if score > heap_min {
-                            heap_s[heap_mi] = score; heap_i[heap_mi] = vi as u32;
-                            heap_min = heap_s[0]; heap_mi = 0;
-                            for h in 1..k { if heap_s[h] < heap_min { heap_min = heap_s[h]; heap_mi = h; } }
-                        }
-                    }
-                }
+                score_query_into_heap(
+                    &qlut.uint8_luts,
+                    qlut.scale,
+                    qlut.bias,
+                    blocked_codes,
+                    vec_scales,
+                    n_byte_groups,
+                    n_vectors,
+                    n_blocks,
+                    mask,
+                    k,
+                    &mut heap_s,
+                    &mut heap_i,
+                    &mut heap_sz,
+                    &mut heap_min,
+                    &mut heap_mi,
+                );
                 let mut pairs: Vec<(f32, u32)> = heap_s[..heap_sz].iter()
                     .zip(heap_i[..heap_sz].iter()).map(|(&s, &i)| (s, i)).collect();
                 pairs.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
